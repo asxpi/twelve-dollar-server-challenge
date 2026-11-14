@@ -136,3 +136,37 @@ Monitor log: `bench/box-logs/mon280.log`.
   about 200k). With 40k on one ring all closed. Likely the kernel's multishot-receive missed-EOF
   race; not confirmed for this kernel.
 - `test/test.sh` needs `openssl` on PATH; without it every authenticated check fails.
+
+### 8. 280k probe of v2 with server stats: saturated, and why (open)
+
+Box, v2 (commit `2efb923`), `TD_STATS=1`, 280k users, 180 s ramp, 150 s hold (`s280-v2`;
+per-second server stats in `bench/box-logs/s280-v2.server-stats.log`).
+
+Result: no failed requests and no OOM this time, but p95 4.7 s and p99 16 s. 30.71 µs/req (user
+8.59, sys 22.11), box 76% busy over the whole run.
+
+What the stats show:
+
+- Up to 230k connections the loop is healthy: 120–200 passes/s, passes of 2–12 ms.
+- At 02:14:07 the fifth ring is created: one pass takes 204 ms and 31k requests are deferred.
+- From then on the loop runs 13–15 passes a second of 70–80 ms each. Every pass answers exactly
+  `ANSWER_CAP` = 2,048 requests, all of them from the ready queue, and defers every request that
+  arrives meanwhile (about 28k deferrals a second). That caps throughput near 27k req/s.
+- 280k users send about 29.9k req/s in steady state (0.107 per user, measured at 200k), so the
+  cap is below the arrival rate and the queue only grows. Twice the queue emptied for a second
+  and filled again.
+- The service's own CPU is 84–87% in that regime; with interrupt work on top the core is full.
+
+Findings:
+
+- The earlier estimate that 280k needs ~23k req/s was wrong: it used a run average that included
+  the ramp. Steady state is about 30k req/s, which at 25 µs is already 75% of the core before
+  interrupt work.
+- Once behind, every request takes the deferred path (a copy into a per-connection buffer that
+  is allocated and freed each time, and one extra pass of latency), which costs more per
+  request than the direct path: falling behind makes the server slower.
+- Creating a ring mid-ramp stalls the loop for 0.2 s. Rings should exist before they are needed.
+- User time per request (8.59) is close to Rust's (8.29) with v2, even in this regime.
+
+Not known yet: whether this box can carry 280k at all. The Rust entry is being run at 280k on
+the same rig as calibration.
