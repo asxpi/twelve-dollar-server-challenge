@@ -56,7 +56,7 @@ NOTHING`).
 
 - WAL, `synchronous=NORMAL`, opened through SQLite's `unix-excl` VFS: the process holds the file
   for its life and the WAL index lives in its memory, shared by its two connections.
-- **One transaction per pass.** The loop waits for up to 4 ms or 4,096 completions, then answers
+- **One transaction per pass.** The loop waits for up to 2 ms or 4,096 completions, then answers
   what arrived inside one transaction: reads share a snapshot, writes are group-committed. **No
   response of a pass is handed to the kernel before its COMMIT returns**; if the COMMIT fails,
   the pass's responses become 500s and their connections are closed.
@@ -123,7 +123,7 @@ SQLite options (in `build.sh`): `THREADSAFE=2`, `DEFAULT_MEMSTATUS=0`, `DEFAULT_
 `OMIT_PROGRESS_CALLBACK`, `OMIT_SHARED_CACHE`, `OMIT_LOAD_EXTENSION`, `OMIT_AUTOINIT`, `OMIT_UTF16`,
 `OMIT_TRACE`, `OMIT_COMPLETE`, `OMIT_GET_TABLE`, `OMIT_TCL_VARIABLE`, `HAVE_FDATASYNC`, `HAVE_USLEEP`.
 
-Optional settings, all with defaults: `TD_WAIT_US` (4000) and `TD_BATCH` (4096), the pass window;
+Optional settings, all with defaults: `TD_WAIT_US` (2000) and `TD_BATCH` (4096), the pass window;
 `TD_RINGS` (6); `TD_ANSWER_CAP` (2048); `TD_CKPT_FRAMES` (4096), `TD_HOLD_MS` (250),
 `TD_HOLD_MAX_MS` (2000), `TD_CKPT_FORCE` (65536); `TD_CACHE_KB` (65536); `TD_WALBUF` (1);
 `TD_FEED_PLAIN` (0); `TD_STATS=1` prints one line of counters a second on stderr.

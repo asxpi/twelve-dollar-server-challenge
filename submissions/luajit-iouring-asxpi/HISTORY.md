@@ -499,3 +499,28 @@ had the author half.
 - A source-only copy of this branch (no `bench/`, no notes, no `vendor/`) run through
   `test/run.sh` on the box as user `deploy`: `build.sh` fetched and checked SQLite, built the
   shim, and the suite passed 42/42.
+
+### 25. Pass window: 2, 4 and 8 ms at 265k; 2 ms becomes the default
+
+Box, the source-only PR tree (this branch), organiser's protocol, stats on.
+
+| 265k users | 2 ms (`w2-pr`) | 4 ms (`w4-pr`) | 8 ms (`w8-pr`) |
+|---|---:|---:|---:|
+| Requests/s | 25,658 | 25,100 | 25,507 |
+| p95 / p99 | 646 ms / 2.35 s | 2.07 s / 5.22 s | 853 ms / 2.65 s |
+| µs/req (user / sys) | 23.51 (6.00 / 17.51) | 26.02 (5.83 / 20.19) | 24.69 (5.57 / 19.12) |
+| Box busy | 75% | 80% | 77% |
+| WAL peak (frames) | 23,156 | 48,414 | 64,887 |
+| Holds ended unfinished | 73 | 120 | 156 |
+| Longest hold / commit | 1.5 s / 145 ms | 2.0 s / 391 ms | 2.1 s / 257 ms |
+
+- Latency and total CPU do not follow the window (4 ms is the worst of the three): one run each,
+  and runs on this box differ by that much.
+- What does follow it: user time falls a little as the window grows (6.00, 5.83, 5.57), and the
+  checkpoint falls further behind (WAL peak 23k, 48k, 65k frames; 73, 120, 156 unfinished holds).
+  Bigger commits leave the log longer between chances to restart it.
+- 2 ms gave the best run of any server at this load so far and the least checkpoint strain, so it
+  is the default now. The 4 ms default of section 4 was chosen at 200k users on the Linode rig,
+  where the checkpoint was not under pressure.
+- No failed requests in any of the three. None passes the organiser's thresholds on this rig.
+- Tests 42/42 locally and through `test/run.sh` on the box with the final tree.

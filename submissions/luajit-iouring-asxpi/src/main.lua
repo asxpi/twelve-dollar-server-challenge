@@ -35,7 +35,8 @@ local MAX_CQE = env("TD_MAX_CQE", 16384)          -- completions handled per rin
 local ANSWER_CAP = env("TD_ANSWER_CAP", 2048)     -- requests answered per pass; the rest are read and queued
 local CKPT_BOOST = env("TD_CKPT_BOOST", 16384)    -- WAL frames past which the checkpoint thread gets normal priority
 local BATCH = env("TD_BATCH", 4096)                -- completions to wait for ...
-local WAIT_US = env("TD_WAIT_US", 4000)           -- ... or this long, whichever comes first (measured: 4 ms costs 15% less CPU per request than 1 ms)
+local WAIT_US = env("TD_WAIT_US", 2000)           -- ... or this long, whichever comes first. At 265k users 2, 4 and 8 ms
+                                                  -- cost about the same CPU; the WAL peaked at 23k, 48k and 65k frames
 local CACHE_KB = env("TD_CACHE_KB", 65536)
 local AUTOCKPT = env("TD_AUTOCKPT", 1000)
 local BACKLOG = env("TD_BACKLOG", 4096)
