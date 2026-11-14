@@ -1,162 +1,101 @@
 # Plan: things to try
 
-Written 2026-11-14. Goal: get the LuaJIT build to the level of the top entries (310k users).
+Updated 2026-11-14. What happened so far is in `HISTORY.md`; this file is the to-do list.
 
 ## Where it stands
 
-Measured on the Xeon 8260 test box at 200k users, app CPU per request from the
-service's cgroup (the leaderboard's metric). Only these two runs are clean so far:
+Test rig: the 1 vCPU Xeon 8260 box, loaded by one generator in the same datacenter (16 vCPU,
+six source addresses) running `bench/mload`.
 
-| Build | µs/req | user | sys |
-|---|---:|---:|---:|
-| Lua, current | 31.68 | 12.39 | 19.29 |
-| Rust `rust-iouring-kensac` (#1, 310k) | 26.13 | 7.93 | 18.20 |
+Same load, same protocol (265k users, 60 s ramp, 5-minute hold):
 
-- Gap: 5.5 µs/req (21%), of which 4.5 user and 1.1 kernel.
-- Rust's 26.1 matches its leaderboard figure (25), so the rig is comparable to the real benchmark.
-- If both fail at the same CPU level, the current build lands around 255k. That is an
-  extrapolation, not a measured score.
-- The top ten (280k–310k) are within the benchmark's run-to-run noise (5% steps).
+| | Lua v6 | Rust (`rust-iouring-kensac`, #1) |
+|---|---:|---:|
+| Requests/s | 25,313 | 25,119 |
+| p95 / p99 | 1.22 s / 3.51 s | 2.68 s / 6.31 s |
+| Failed requests | 0 | 0 |
+| µs/req (user / sys) | 25.09 (7.03 / 18.06) | 25.13 (7.27 / 17.86) |
+| Peak RAM | 1,678 MB | 1,160 MB |
 
-Profile on the laptop (share of total CPU): `io_uring_enter` 47%, `json.escape` 12%, users seek in
-`post_emit` 8%, `get_feed` 5%, COMMIT 4%, like insert 4%, `post_object` 3%.
+- Lua and Rust now cost the same per request, and Lua's user time is slightly below Rust's.
+- Neither passes the organiser's thresholds (p95 < 500 ms, p99 < 1 s) on this rig at 265k or
+  280k. Rust is scored at 310k on his. So this rig ranks servers against each other; it does not
+  predict a leaderboard score.
+- `mload` sends about 0.105 requests per user per second; the leaderboard's k6 numbers work out
+  to about 0.095. 280k users here is about the request rate of 310k there.
+
+Two branches:
+
+- `luajit-iouring-asxpi`: the plain version.
+- `luajit-iouring-asxpi-usercursors`: the same plus one users cursor per feed post (about 4–6%
+  less CPU on the laptop; a rule 5 question, see `HISTORY.md` section 14).
 
 ## Done
 
-- [x] Generated straight-line `json.escape` (64-bit word checks, no loop up to 128 bytes), record
-      buffers +8 bytes. Tests 42/42. Laptop: −1.8 µs/req. Microbenchmark: 2.6 vs 6.0 µs per feed.
+- [x] Batching window 4 ms / 4096 by default.
+- [x] `json.escape` through a byte scan in the shim (the generated-Lua version made the JIT
+      unstable; `HISTORY.md` section 13).
+- [x] JSON reader: no loops that are entered and left at once; nothing gets blacklisted.
+- [x] `json.uint` without division; one `td_rowid` call per feed row.
+- [x] SQLite built with the remaining `OMIT_*` flags.
+- [x] Six rings made at startup; empty rings cost no system call; idle sleep with spare rings.
+- [x] SHA-256 with eight rounds per loop iteration (2.0 µs per token instead of 5.1).
+- [x] Checkpoints that keep up under load: normal priority while a round runs, longer holds
+      after a failed one, writes held past 65,536 WAL frames.
+- [x] Users cursor per feed post (on its own branch).
+- [x] Rig: generator in the box's datacenter; `mload` with `-src` and a source port per user;
+      harness drain step; one run at a time.
 
-- [x] v2 (2026-11-14, tests 42/42, not yet measured on the box):
-  - 4 ms / 4096 batching window is the default in `main.lua` (was 1 ms / 512).
-  - `json.uint`: straight-line, two digits at a time, no division (6.8 ns for a 7-digit id).
-  - `get_feed`: one `td_rowid` call per row instead of two.
-  - `build.sh`: `OMIT_AUTOINIT`, `OMIT_UTF16`, `OMIT_TRACE`, `OMIT_COMPLETE`, `OMIT_GET_TABLE`,
-    `OMIT_TCL_VARIABLE`, as the Rust entry builds.
-  - Expected gain beyond the window: small (1–2%). Previous sources are in `bench/orig-v1/`.
+## Next runs (one at a time)
 
-Profile after `escape` and the window (laptop, share of total CPU): `io_uring_enter` 43%, users
-seek in `post_emit` 9%, COMMIT 7%, `get_feed` 6%, `post_object` 4%, `escape` 3%, `uint` 3%,
-like insert 3%, post insert 3%, SHA-256 3%.
+- [ ] Rust at 250k (running).
+- [ ] v6 with users cursors at 265k: does the laptop's 4–6% show on the box?
+- [ ] v6 at 250k and 280k, to have Lua and Rust at three loads each.
+- [ ] Repeat one pair (Lua and Rust at 265k): Rust's two runs differed a lot (p95 943 ms at
+      280k, 2.68 s at 265k), so single runs cannot rank loads 5% apart.
+- [ ] Try `mload` with `-think-scale` set so that requests per user match k6 (about 0.095/s).
 
-- [x] v3 (2026-11-14, tests 42/42, 9,000 connections over three rings checked locally):
-  six rings are made at startup (`TD_RINGS`), rings with no connections cost no system call,
-  and the loop takes its long idle sleep again when only ring 1 is in use.
+## To fix or understand
 
-## Before the next run
+- [ ] **Memory.** Lua peaks 500 MB above Rust (1,678 MB of 1,967). Find what it is: output
+      buffer pool (up to 4,096 × 8 KB), six rings' buffers, per-connection stash buffers, the
+      WAL in page cache. An out-of-memory kill is an automatic loss.
+- [ ] **Checkpoint strain at 265k.** 80 holds ended unfinished, the longest hold was 4.8 s, one
+      commit took 3.4 s, the log peaked at 61,650 frames. Options: start rounds earlier
+      (`TD_CKPT_FRAMES` below 4,096), `sync_file_range` so the final `fsync` is short, a custom
+      VFS that writes a commit's WAL frames in one write.
+- [ ] **Backlog state.** It still appears for seconds at a time: 13 passes a second, each
+      answering exactly `ANSWER_CAP` (2,048) requests from the ready queue and deferring
+      everything new. Try a larger cap, a pool for the deferred-request buffers, and LIFO for the
+      ready queue while a backlog exists.
+- [ ] **Why this box is harsher than the organiser's.** Candidates: `mload` does not slow down
+      when the server does (k6 does); slower disk (`fsync` timing, about a minute to measure);
+      38% of the box's CPU goes to network interrupt work.
+- [ ] After a mass disconnect ~98k sockets stay in CLOSE-WAIT (Rust leaves them too). Likely
+      the kernel's multishot-receive missed-EOF race. Not score-relevant.
 
-Decided by the 280k probes (HISTORY.md sections 7 and 8) and the Rust calibration at 280k:
+## Smaller ideas, not started
 
-- [x] Rings made at startup instead of mid-ramp (v3).
-- [ ] Read the Rust calibration: if Rust also fails 280k on this rig, the rig is harsher than
-      the real benchmark and scores have to be compared at equal load, not against 310k.
-- [ ] Deploy v3 and probe 240k and 260k (180 s ramp, 5-minute hold) to find where it holds.
-- [x] (done, HISTORY.md section 11) Load generator closer to the box. The organiser's are in the same datacenter (0.25 ms);
-      ours are 17 ms away over the internet. Another entry (`cider-iouring-pomilon-v4`) used one
-      4 vCPU load generator at the same provider with five source addresses and reports clean
-      holds at 280k–290k. This may also end the connection timeouts between runs.
-- [ ] Decide on the users-cursor idea (section 3): the largest user-space item left, but a
-      rule 5 question.
+- [ ] Compare 2 ms and 8 ms batching windows by µs/req.
+- [ ] Huge pages for the SQLite page cache; a custom page cache (`SQLITE_CONFIG_PCACHE2`).
+- [ ] Registered ring fd for `io_uring_enter`.
+- [ ] `perf` on the box for Lua and Rust at the same load, to compare kernel time by symbol.
+- [ ] JIT parameters (`maxtrace`, `hotloop`): only with a stability series.
 
-## To try, in order
+## Before the PR
 
-### 1. Confirm on the box
+- [ ] Choose the branch (plain, or users cursors if the organiser accepts it).
+- [ ] README: language and versions, direct (no Nginx), the optimisations and why, and credit
+      to `rust-iouring-kensac`, which this server's design and part of `shim.c` follow.
+- [ ] Keep `bench/`, `plan.md`, `education.md` and `HISTORY.md` out of the PR branch (the
+      challenge wants source only in the submission folder).
 
-Second series, 200k users, 120 s ramp (only the first run of a series is clean; see Measuring):
+## Rules for changes
 
-| Build | µs/req | user | sys | failed requests |
-|---|---:|---:|---:|---:|
-| Lua, current | 29.50 | 12.60 | 16.90 | 0% |
-| Lua + `escape` | 28.00 | 9.84 | 18.15 | 1.4% |
-| Rust | 25.33 | 8.29 | 17.04 | 0.03% |
-| Lua + `escape` + `TD_WAIT_US=4000 TD_BATCH=4096` | 24.20 | 8.34 | 15.86 | 8.8% |
-
-Re-run after a 10-minute pause, same load, no failed requests (3.90M requests):
-
-| Build | µs/req | user | sys | failed requests |
-|---|---:|---:|---:|---:|
-| Lua + `escape` + `TD_WAIT_US=4000 TD_BATCH=4096` | 25.21 | 10.04 | 15.18 | 0% |
-| Lua + `escape`, 1 ms window (collapsed, see below) | 51.95 | 23.40 | 28.56 | 0.14% |
-
-- [x] `escape` + 4 ms window, clean: 25.21 µs/req, level with Rust (25.33) and 15% below the
-      current build (29.50). User time is still 1.7 µs above Rust; kernel time is 1.9 µs below.
-      Passed: p95 53 ms, p99 216 ms.
-- [x] **Collapse explained** (HISTORY.md section 8): once the loop falls behind, every pass
-      answers exactly `ANSWER_CAP` requests from the ready queue and defers all new ones; if that
-      rate is below the arrival rate it never recovers. Original note: the `escape`-only run with the 1 ms window went wrong:
-      CPU per request doubled (52 µs), the box was 75% busy at only 13k req/s, p95 4.7 s and
-      p99 10 s, with just 0.14% failed requests. This is what a failed probe looks like. Not
-      reproduced, cause unknown. Suspect: a backlog puts connections on the ready/re-arm queues,
-      the loop then stops waiting (`wait = 0`) and runs many near-empty passes, each paying the
-      fixed per-pass cost. Reproduce with `TD_STATS=1` and look at passes/s, deferred, rearm.
-- [ ] `escape` alone at 200k, clean (still missing because of the collapse above).
-- [x] 4 ms / 4096 is the default in `main.lua` (v2).
-- [ ] Compare 2 ms and 8 ms by µs/req; latency budget is p95 500 ms.
-
-### 2. Per-pass overhead
-
-- [ ] Measure one pass with nothing to do: BEGIN/COMMIT, opening four cursors, one
-      `io_uring_enter` per ring, clock calls. Skip the transaction when a pass has no requests.
-- [x] (v3) Idle spin: with more than one ring the loop never takes the long sleep (980 passes/s at
-      0 req/s on the box, 1–2% CPU). Let extra rings be idle too.
-
-### 3. Lua layer (remaining user-space gap)
-
-- [x] (v2, partly) `get_feed`: `td_rowid` is now called once per row. Still open: one shim call that
-      returns rowid and payload.
-- [ ] Users seek in `post_emit` (now the largest user-space item, 9% + 2% from single posts):
-      20 root-to-leaf descents per feed. Idea: one users cursor per feed position. Within a pass
-      the feed rarely changes, so the next feed request asks each cursor for the row it is
-      already on, and `sqlite3BtreeTableMoveto` returns at once (its own same-key fast path); the
-      bytes are still read from SQLite's page for every request. Could be worth ~2 µs/req.
-      **Rule question first:** it reuses a cursor position from an earlier request in the same
-      transaction. Other entries already rely on the same fast path for consecutive ids, but ask
-      the maintainer or state it plainly in the README before shipping it.
-- [ ] Generate the record decoders the same way as `escape` (straight-line, specialised to the
-      schema).
-- [ ] Run the server with `-jv` under load on the box: look for aborted or blacklisted traces
-      on the hot path. A helper function got blacklisted once already and ran 10× slower.
-- [ ] JIT parameters in `start.sh`: `-Omaxtrace=…`, `maxmcode`, `hotloop`. Cheap A/B.
-- [ ] HMAC-SHA256 in pure Lua (writes are ~9% of requests): measure before touching.
-
-### 4. Kernel side (1.1 µs more than Rust)
-
-- [ ] `perf` on the box (installed) for both servers at the same load; diff the kernel symbols.
-- [ ] Compare accept strategy (multishot here, single-shot in Rust) and batch size (512 vs 256).
-- [ ] Registered ring fd for `io_uring_enter` (small).
-
-### 5. SQLite
-
-- [x] (v2) Add the flags Rust builds with: `OMIT_AUTOINIT`, `OMIT_UTF16`, `OMIT_TRACE`,
-      `OMIT_COMPLETE`, `OMIT_GET_TABLE`, `OMIT_TCL_VARIABLE` (expected small).
-- [ ] Custom VFS that writes a commit's WAL frames in one write (allowed by the 2026-10-31
-      ruling; several entries do it). Stock SQLite does two `pwrite`s per frame.
-- [ ] Huge pages for the page cache (`MADV_HUGEPAGE`; THP is `madvise` on the box).
-- [ ] Custom page cache through `SQLITE_CONFIG_PCACHE2` (allowed, 12 entries use it).
-- [ ] `sync_file_range` to spread checkpoint writeback.
-
-### 6. Tail latency
-
-Top entries fail on p99 at 80–97% CPU with zero errors, not on average CPU.
-
-- [ ] LIFO for the ready queue while a backlog exists (FIFO makes everyone late).
-- [x] 280k probed twice: failed both times (HISTORY.md sections 7 and 8).
-- [ ] Probes at 240k and 260k.
-- [ ] Backlog regime: a deferred request is copied into a buffer that is allocated and freed
-      each time. Take those buffers from a pool, and look at whether fresh requests can be
-      answered directly while the ready queue is being drained.
-
-### 7. Bugs found on the way (not score-relevant)
-
-- [ ] After 100k clients disconnect at once, ~98k sockets stay in CLOSE-WAIT (server alive, FINs
-      received, never closed). Fine with 40k on one ring. Rust left ~200k open too. Likely the
-      kernel's multishot-receive missed-EOF race (fixed upstream in 2026); not confirmed for
-      6.8.0-117. The benchmark restarts the app per probe, so the score is unaffected.
-
-## Tried and dropped
-
-- Word-at-a-time `escape` with a loop (32- or 64-bit): slower than the byte loop. The per-call
-  cost of entering a small loop dominates, and a pointer that escapes its trace is not free.
-- `escape` with a helper function for the word check: the helper is blacklisted by the JIT.
+- A change to hot Lua code is run at least six times with `luajit -jv`; the abort and blacklist
+  counts are part of the result. A microbenchmark is not enough (section 13).
+- Code generated at load time must not add data-dependent branches inside a caller's loop.
+- One box run at a time, explained before the next.
 
 ## Don't (rule flags on the leaderboard)
 
@@ -164,22 +103,19 @@ Top entries fail on p99 at 80–97% CPU with zero errors, not on average CPU.
 - Reads that see uncommitted writes.
 - Patching SQLite, an own engine for its file format, or writing `BtCursor` fields.
 - PGO profiles committed to the repo.
-- Anything needing root or a sysctl (the service runs as `deploy`).
+- Anything needing root or a sysctl on the box (the service runs as `deploy`).
 
 ## Measuring
 
-- Box (address in `bench/hosts.env`): `tds.service` runs `submissions/$SUB` from `/etc/tds.env` (original saved as
-  `/etc/tds.env.orig`). Variants live in `/home/deploy/tds/submissions/`:
-  `luajit-iouring-asxpi-cur`, `-esc`, `rust-iouring-kensac`.
-- Load: `bench/mload` on one generator in the box's datacenter (`claude-test-tds-loadgen`, six
-  source addresses, `-src`), same user model as `bench/load.js`. The five Linodes used up to
-  HISTORY.md section 10 are deleted.
-- Between runs: stop the service and wait until `/proc/net/sockstat` shows sockets and orphans
-  near zero on the box and the load generators. Restarting straight away leaves the box in TCP
-  memory pressure and the next run times out.
-- Leave about 10 minutes between runs. Even after a full drain, the second and later runs of a
-  back-to-back series had 1–9% of connection attempts time out while the box logged no listen
-  drops; the first run after a pause was always clean. Cause not found (suspect: SYN rate
-  limiting on the path between Linode and the box).
-- Ramp 120 s for 200k users. Latency from short runs is dominated by the ramp; compare µs/req.
-- Laptop numbers are only good for A/B, with the power state unchanged during a series.
+- Box: `tds.service` runs `submissions/$SUB` from `/etc/tds.env` (original saved as
+  `/etc/tds.env.orig`). Versions live in `/home/deploy/tds/submissions/`.
+- `bench/box.sh <label> <folder-on-box> <users> <ramp> <hold>` does one run: drains both
+  machines, restarts the service on a fresh database, runs `mload`, and prints µs/req from the
+  service's cgroup. Hosts are in `bench/hosts.env` (not in git). `EXTRA="TD_STATS=1"` turns the
+  server's per-second stats on.
+- Organiser's protocol: 60 s ramp, 5-minute hold. Compare servers by requests per second.
+- Laptop: `bench/run.sh` (k6, small loads) for A/B and stability series only; the power state
+  must not change during a series.
+- `test/test.sh` needs `openssl` on PATH.
+- The shell is zsh: it does not split `$var` into words. Run multi-step harness commands
+  through `bash -c`.
