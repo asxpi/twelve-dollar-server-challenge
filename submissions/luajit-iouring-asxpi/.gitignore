@@ -3,3 +3,4 @@ libtdshim.so
 bench/hosts.env
 bench/db/
 bench/orig*/
+bench/mload/mload

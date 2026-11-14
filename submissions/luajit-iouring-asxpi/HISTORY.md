@@ -205,3 +205,16 @@ Findings:
   interrupt work is charged to the service, so µs/req is only comparable at equal load.
 - Likely reason the rig is harsher: the load generators are 17 ms away over the internet (the
   organiser's are 0.25 ms away in the same datacenter). Not verified.
+
+### 11. Rig: a load generator in the box's datacenter (set up, not yet used)
+
+A second machine at the same provider, on the box's subnet: 8 vCPU, 10 GB RAM, Ubuntu 24.04,
+six IPv4 addresses, 0.34 ms from the box (the Linodes are 17 ms away).
+
+- `bench/mload/` is a copy of the load tool with one addition, `-src`: a list of local
+  addresses to dial from. One source address reaches about 64k connections to one target
+  address and port, so six cover about 387k users from one machine.
+- Generator settings (`/etc/sysctl.d/90-loadgen.conf`): local ports 1024–65535,
+  `tcp_max_orphans` 524,288, `tcp_tw_reuse` 1, a larger `tcp_mem`, `fs.nr_open` 2,097,152. The
+  box itself stays stock.
+- Checked: the tool starts with all six source addresses. No load has been sent from it yet.
