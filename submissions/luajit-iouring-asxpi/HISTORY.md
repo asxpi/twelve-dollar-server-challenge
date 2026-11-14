@@ -386,3 +386,27 @@ Box, organiser's protocol unless noted (60 s ramp, 5-minute hold), healthy gener
   5,000 frames, holds of 240–260 ms). With a busy loop stealing the server's core, the old code
   let the log grow without bound (117,726 frames after 60 s and rising); the new code peaked
   at 39,712 and reset it, at the price of holds up to 2.9 s (p99 0.9 s in that test).
+
+### 19. v6 at 265k against Rust at 265k: level
+
+Box, organiser's protocol (60 s ramp, 5-minute hold), healthy generator.
+
+| 265k users | Lua v6 (`v265-v6`, stats on) | Rust (`r265-rust`) |
+|---|---:|---:|
+| Requests/s | 25,313 | 25,119 |
+| p95 / p99 | 1.22 s / 3.51 s | 2.68 s / 6.31 s |
+| Failed requests | 0 | 0 |
+| µs/req (user / sys) | 25.09 (7.03 / 18.06) | 25.13 (7.27 / 17.86) |
+| Box busy / softirq | 79% / 39% | 79% / 38% |
+| Peak RAM | 1,678 MB | 1,160 MB |
+
+- The checkpoint change (section 18) holds on the box: no out-of-memory kill, the log reset
+  throughout and mostly stayed between 1,000 and 20,000 frames.
+- Same CPU per request as Rust; Lua's user time is slightly lower. Latency is in the same class;
+  Lua's figures are better in this pair, but Rust's own runs differ more than that (p95 943 ms
+  at 280k, 2.68 s at 265k), so this is a tie.
+- Still strained: 80 holds ended unfinished, longest hold 4.8 s, one commit of 3.4 s, log peak
+  61,650 frames. The backlog state (13 passes a second, everything deferred) still shows up for
+  a few seconds at a time.
+- Lua peaks 500 MB above Rust in memory, on a 1,967 MB box. Not yet explained.
+- Neither server passes the organiser's thresholds on this rig at 265k.
