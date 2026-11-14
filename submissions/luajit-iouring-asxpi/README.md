@@ -30,7 +30,8 @@ the recipe used here.
 
 `GET /feed` and `GET /posts/:id` use SQLite's own B-tree cursor functions inside the pass's
 transaction. `shim.c` `#include`s the unmodified amalgamation and only moves cursors through
-`sqlite3Btree*` functions; it writes none of SQLite's private structs. Lua decodes the record
+`sqlite3Btree*` functions; it writes no cursor or B-tree state, only the search keys it passes
+to those functions (a `KeyInfo` per index and the `UnpackedRecord` for the likes seek). Lua decodes the record
 bytes and writes the JSON. Writes go through SQL (`INSERT … RETURNING`, `INSERT … ON CONFLICT DO
 NOTHING`).
 
@@ -59,7 +60,9 @@ NOTHING`).
 - **One transaction per pass.** The loop waits for up to 2 ms or 4,096 completions, then answers
   what arrived inside one transaction: reads share a snapshot, writes are group-committed. **No
   response of a pass is handed to the kernel before its COMMIT returns**; if the COMMIT fails,
-  the pass's responses become 500s and their connections are closed.
+  the pass's responses become 500s and their connections are closed. A read answered after a
+  write of the same pass sees that write, as any statement in a transaction sees the ones before
+  it; because of the rule above no client is ever shown a row that was not committed.
 - **One write per commit.** SQLite writes each WAL frame as two writes. A small VFS over
   `unix-excl` (SQLite's public VFS interface) collects the WAL writes of a COMMIT and writes them
   when the commit frame's page arrives, still inside SQLite's own write call, so the commit is in

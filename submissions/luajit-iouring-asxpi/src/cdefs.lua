@@ -71,7 +71,7 @@ typedef struct {
 
 /* shim.c */
 const char *td_errmsg(void);
-int td_open(const char *path, int cache_kb, int autockpt);
+int td_open(const char *path, int cache_kb);
 int td_begin(void);
 int td_commit(void);
 int td_row(int cur, int64_t rowid, uint8_t *buf, uint32_t cap);
@@ -79,8 +79,6 @@ int td_exists(int cur, int64_t rowid);
 int td_first(int cur, uint8_t *buf, uint32_t cap);
 int td_next(int cur, uint8_t *buf, uint32_t cap);
 int td_count_likes(int64_t post_id);
-int td_prev(int cur, uint8_t *buf, uint32_t cap);
-int64_t td_rowid(int cur);
 int td_likes_seek(int64_t post_id, uint8_t *buf, uint32_t cap);
 int td_insert_post(int64_t user_id, const uint8_t *body, int n, int64_t *id, uint8_t *created, int created_cap);
 int td_insert_like(int64_t user_id, int64_t post_id);
@@ -92,8 +90,6 @@ int td_wal_frames(void);
 int td_ckpt_start(void);
 int td_ckpt_boost(int on);
 int td_ckpt_running(void);
-int td_ckpt_left(void);
-int td_ckpt_rounds(void);
 int td_ckpt_done(void);
 ]]
 

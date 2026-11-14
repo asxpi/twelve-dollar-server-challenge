@@ -38,7 +38,6 @@ local BATCH = env("TD_BATCH", 4096)                -- completions to wait for ..
 local WAIT_US = env("TD_WAIT_US", 2000)           -- ... or this long, whichever comes first. At 265k users 2, 4 and 8 ms
                                                   -- cost about the same CPU; the WAL peaked at 23k, 48k and 65k frames
 local CACHE_KB = env("TD_CACHE_KB", 65536)
-local AUTOCKPT = env("TD_AUTOCKPT", 1000)
 local BACKLOG = env("TD_BACKLOG", 4096)
 local CKPT_FRAMES = env("TD_CKPT_FRAMES", 4096)   -- WAL frames (4 KB each) that start a checkpoint
 local HOLD_MS = env("TD_HOLD_MS", 250)            -- how long writes wait for a checkpoint to finish, at first
@@ -692,7 +691,7 @@ local function main()
   if MARGIN * 4 > table_size then MARGIN = math.floor(table_size / 4) end
 
   local shim = ffi.load(SRC .. "/../libtdshim.so")
-  if shim.td_open(SQLITE_PATH, CACHE_KB, AUTOCKPT) ~= 0 then
+  if shim.td_open(SQLITE_PATH, CACHE_KB) ~= 0 then
     die("database " .. SQLITE_PATH .. ": " .. ffi.string(shim.td_errmsg()))
   end
   app.init(shim, JWT_SECRET)

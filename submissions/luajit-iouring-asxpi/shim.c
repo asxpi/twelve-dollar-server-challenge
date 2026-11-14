@@ -1,11 +1,12 @@
 /*
  * The only C in this submission: a thin layer over the unmodified SQLite amalgamation.
  *
- * It exposes SQLite's own B-tree cursor API (seek, first, next, previous, payload) and five prepared
+ * It exposes SQLite's own B-tree cursor API (seek, first, next, payload) and five prepared
  * statements to LuaJIT. No HTTP, JWT or record decoding happens here: Lua gets the record bytes
  * SQLite returns and does the rest. The one exception is td_json_clean, a byte scan that tells
- * the JSON writer how much of a string needs no escaping. Nothing here writes SQLite's private
- * structs; cursors are only moved through sqlite3Btree* functions.
+ * the JSON writer how much of a string needs no escaping. Nothing here writes a cursor's
+ * or the B-tree's state: cursors are only moved through sqlite3Btree* functions, and the only
+ * SQLite structs filled in are the search keys handed to them (a KeyInfo per index, the likes key).
  *
  * WAL checkpoints run on a second thread with its own connection, so the event loop never waits
  * for their fsyncs. Both connections use SQLite's "unix-excl" VFS: the process owns the file and
@@ -41,7 +42,7 @@ static sqlite3 *ckdb;
 static pthread_mutex_t ck_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t ck_cv = PTHREAD_COND_INITIALIZER;
 static int ck_req;
-static volatile int ck_running, ck_log = -1, ck_done = -1, ck_rounds;
+static volatile int ck_running, ck_done = -1;
 static volatile int wal_frames;
 static pid_t ck_tid;
 
@@ -245,8 +246,7 @@ static void *ck_main(void *arg) {
       if (own_wal_fd < 0 && wal_path[0]) own_wal_fd = open(wal_path, O_RDONLY | O_CLOEXEC);
       if (own_wal_fd >= 0) posix_fadvise(own_wal_fd, 0, 0, POSIX_FADV_DONTNEED);
     }
-    ck_log = nlog; ck_done = ndone;
-    ck_rounds++;
+    ck_done = ndone;
     __atomic_store_n(&ck_running, 0, __ATOMIC_RELEASE);
   }
   return 0;
@@ -271,16 +271,12 @@ int td_ckpt_boost(int on) {
   return sched_setscheduler(ck_tid, on ? SCHED_OTHER : SCHED_IDLE, &sp);
 }
 int td_ckpt_running(void) { return __atomic_load_n(&ck_running, __ATOMIC_ACQUIRE); }
-/* frames left in the log after the last round (0 = everything is in the database file) */
-int td_ckpt_left(void) { return (ck_log < 0 || ck_done < 0) ? -1 : ck_log - ck_done; }
-int td_ckpt_rounds(void) { return ck_rounds; }
 /* frames the last round had copied into the database file when it ended */
 int td_ckpt_done(void) { return ck_done; }
 
-int td_open(const char *path, int cache_kb, int autockpt) {
+int td_open(const char *path, int cache_kb) {
   int rc;
   char sql[256];
-  (void)autockpt;
   sqlite3_initialize();
   const char *vfs = td_vfs_name();
   own_db_fd = open(path, O_RDWR | O_CLOEXEC);
@@ -473,16 +469,6 @@ int td_next(int c, uint8_t *buf, uint32_t cap) {
   if (rc) return -1;
   return payload(c, buf, cap);
 }
-
-int td_prev(int c, uint8_t *buf, uint32_t cap) {
-  int rc = sqlite3BtreePrevious(cur[c], 0);
-  if (rc == SQLITE_DONE) return 0;
-  if (rc) return -1;
-  return payload(c, buf, cap);
-}
-
-/* rowid of the entry a table cursor is on */
-int64_t td_rowid(int c) { return sqlite3BtreeIntegerKey(cur[c]); }
 
 /* Positions the likes_post_id_idx cursor on its first entry with post_id >= the argument, like
    OP_SeekGE. 1 = on an entry, 0 = none, -1 = error. */

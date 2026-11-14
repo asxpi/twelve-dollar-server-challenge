@@ -544,3 +544,20 @@ Box, the PR tree with its default window, same protocol (`w2b-pr`), next to the 
   (2.4 s at 60 s) and one spike at 340 s. From 100 s to 300 s every sample shown had p95 between
   70 and 160 ms.
 - Both 2 ms runs are better than the 4 ms, 8 ms and Rust runs at this load on every figure.
+
+### 27. Cleanup after a read-through (no behaviour change)
+
+- Removed what nothing used: `td_prev`, `td_rowid`, `td_ckpt_left`, `td_ckpt_rounds` (and the
+  `ck_log` / `ck_rounds` counters behind them) from the shim and `cdefs.lua`; the `autockpt`
+  argument of `td_open` and `TD_AUTOCKPT`, which the shim ignored (`wal_autocheckpoint` is 0);
+  `HN` and an assert that could not fail in `app.lua`.
+- README and the shim's header said the shim "writes none of SQLite's private structs". It fills
+  the search keys it passes in (`KeyInfo`, the likes `UnpackedRecord`). Reworded: no cursor or
+  B-tree state is written.
+- README now says that a read answered after a write of the same pass sees that write, and why
+  no client is shown an uncommitted row (no response leaves before COMMIT; a failed COMMIT turns
+  the pass into 500s).
+- Nothing on the request path changed, so no `-jv` series. Tests 42/42 through `test/run.sh`
+  with the shim rebuilt.
+- Not done: `TD_PROFILE` and the stats code stay (they sit in the main loop, and touching it
+  needs the six-run check); the LuaJIT pin is still the sha256 of a GitHub-generated archive.

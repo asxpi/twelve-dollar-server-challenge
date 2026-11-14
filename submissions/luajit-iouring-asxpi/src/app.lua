@@ -89,8 +89,6 @@ local function head(status)
   return { b = b, n = #s }
 end
 local H_200, H_201 = head("200 OK"), head("201 Created")
-local HN = H_200.n
-assert(H_201.n + 0 == H_201.n)
 
 local function begin_resp(h)
   ffi.copy(resp, h.b, h.n)
