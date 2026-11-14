@@ -183,3 +183,25 @@ connections (65,535 slots minus a 5,000 margin), so 310k users need six.
   one ring: 980 passes/s at zero load on the box).
 - Tests 42/42. Local check with a 4,096-descriptor limit: 9,000 connections spread over three
   rings, 9,000 correct responses in each of two rounds, all closed afterwards.
+
+### 10. Calibration: the Rust entry at 280k on this rig also fails
+
+Box, `rust-iouring-kensac` unchanged, 280k users, 180 s ramp, 150 s hold (`r280-rust`; monitor
+log `bench/box-logs/r280-rust.monitor.log`).
+
+| 280k users on this rig | µs/req | user | sys | p95 | p99 | failed |
+|---|---:|---:|---:|---:|---:|---:|
+| Lua v2 (`s280-v2`) | 30.71 | 8.59 | 22.11 | 4.7 s | 16.2 s | 0% |
+| Rust (`r280-rust`) | 29.91 | 7.59 | 22.32 | 10.4 s | 12.7 s | 0% |
+
+Findings:
+
+- The #1 entry, scored at 310k on the organiser's rig, does not hold 280k here. So this rig is
+  harsher than the real benchmark, and a result here cannot be read as a leaderboard score.
+  Results have to be compared at equal load on the same rig.
+- At 280k the two servers are level: 30.7 against 29.9 µs/req (3%), with the same kernel time.
+  Lua's user time is 1.0 µs above Rust's.
+- Kernel time is 22 µs/req for both at 280k against 15–17 at 200k. With the core full,
+  interrupt work is charged to the service, so µs/req is only comparable at equal load.
+- Likely reason the rig is harsher: the load generators are 17 ms away over the internet (the
+  organiser's are 0.25 ms away in the same datacenter). Not verified.
