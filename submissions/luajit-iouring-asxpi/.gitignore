@@ -4,3 +4,5 @@ bench/hosts.env
 bench/db/
 bench/orig*/
 bench/mload/mload
+bench/hosts.*.env
+!bench/hosts.env.example

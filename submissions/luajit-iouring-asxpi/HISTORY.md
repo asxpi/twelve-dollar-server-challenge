@@ -217,4 +217,10 @@ six IPv4 addresses, 0.34 ms from the box (the Linodes are 17 ms away).
 - Generator settings (`/etc/sysctl.d/90-loadgen.conf`): local ports 1024–65535,
   `tcp_max_orphans` 524,288, `tcp_tw_reuse` 1, a larger `tcp_mem`, `fs.nr_open` 2,097,152. The
   box itself stays stock.
-- Checked: the tool starts with all six source addresses. No load has been sent from it yet.
+- Checked: the tool starts with all six source addresses.
+- Smoke test (`t2k-v3`): 2,000 users through the six addresses, no failed requests, connect
+  time 0.37 ms at p95, response time 8 ms at p95.
+- `box.sh` takes extra `mload` arguments from `hosts.env` (`LG_ARGS`) and merges the results
+  of any number of generators.
+- The five Linode generators were deleted the same day; the last files from the first one are
+  in `bench/box-logs/linode-lg1/`. Runs up to section 10 came from them.

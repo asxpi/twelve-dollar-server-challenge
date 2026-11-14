@@ -50,7 +50,7 @@ Decided by the 280k probes (HISTORY.md sections 7 and 8) and the Rust calibratio
 - [ ] Read the Rust calibration: if Rust also fails 280k on this rig, the rig is harsher than
       the real benchmark and scores have to be compared at equal load, not against 310k.
 - [ ] Deploy v3 and probe 240k and 260k (180 s ramp, 5-minute hold) to find where it holds.
-- [ ] Load generator closer to the box. The organiser's are in the same datacenter (0.25 ms);
+- [x] (done, HISTORY.md section 11) Load generator closer to the box. The organiser's are in the same datacenter (0.25 ms);
       ours are 17 ms away over the internet. Another entry (`cider-iouring-pomilon-v4`) used one
       4 vCPU load generator at the same provider with five source addresses and reports clean
       holds at 280k–290k. This may also end the connection timeouts between runs.
@@ -171,7 +171,9 @@ Top entries fail on p99 at 80–97% CPU with zero errors, not on average CPU.
 - Box (address in `bench/hosts.env`): `tds.service` runs `submissions/$SUB` from `/etc/tds.env` (original saved as
   `/etc/tds.env.orig`). Variants live in `/home/deploy/tds/submissions/`:
   `luajit-iouring-asxpi-cur`, `-esc`, `rust-iouring-kensac`.
-- Load: `mload` on five Linodes (`claude-test-tds-lg1…5`), same user model as `bench/load.js`.
+- Load: `bench/mload` on one generator in the box's datacenter (`claude-test-tds-loadgen`, six
+  source addresses, `-src`), same user model as `bench/load.js`. The five Linodes used up to
+  HISTORY.md section 10 are deleted.
 - Between runs: stop the service and wait until `/proc/net/sockstat` shows sockets and orphans
   near zero on the box and the load generators. Restarting straight away leaves the box in TCP
   memory pressure and the next run times out.

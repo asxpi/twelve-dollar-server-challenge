@@ -4,8 +4,10 @@
 # Output files go to results/<label>.*
 set -u
 S=$(dirname "$(readlink -f "$0")")
-# hosts.env (not in git) sets TARGET_IP and LG_IPS="ip1 ip2 ..."; see hosts.env.example
-. "$S/hosts.env"
+# hosts.env (not in git) sets TARGET_IP, LG_IPS="ip1 ip2 ..." and optionally LG_ARGS (extra mload
+# arguments, such as -src); see hosts.env.example. HOSTS=<file> selects another hosts file.
+LG_ARGS=
+. "${HOSTS:-$S/hosts.env}"
 T=root@$TARGET_IP
 LGS=($LG_IPS)
 B=$S; S=$S/results; mkdir -p "$S"
@@ -19,14 +21,14 @@ grep -q '"status":"ok"' $S/$label.box.log || { echo "$label: server did not come
 s0=$($SSH $T "$snap")
 START=$(( $(date +%s%3N) + 8000 ))
 i=0; for lg in "${LGS[@]}"; do
-  $SSH root@$lg "cd /root && ulimit -n 200000 && ./mload/mload -target $TARGET_IP -ports 80 -users $U -offset $((i*U)) -ramp $RAMP -hold $HOLD -start $START -tokens tokens.json -out cmp.json > cmp.log 2>&1" &
+  $SSH root@$lg "cd /root && (ulimit -n 1000000 2>/dev/null || ulimit -n 200000) && ./mload/mload $LG_ARGS -target $TARGET_IP -ports 80 -users $U -offset $((i*U)) -ramp $RAMP -hold $HOLD -start $START -tokens tokens.json -out cmp.json > cmp.log 2>&1" &
   i=$((i+1))
 done
 wait
 s1=$($SSH $T "$snap")
 for lg in "${LGS[@]}"; do $SSH root@$lg 'test -s /root/cmp.json' || { echo "$label: no result from $lg"; exit 1; }; done
 i=0; for lg in "${LGS[@]}"; do scp -q -o BatchMode=yes root@$lg:/root/cmp.json $S/$label.lg$i.json; scp -q -o BatchMode=yes $S/$label.lg$i.json root@${LGS[0]}:/root/m$i.json; i=$((i+1)); done
-$SSH root@${LGS[0]} "cd /root && ./mload/mload -merge -out mtotal.json m0.json m1.json m2.json m3.json m4.json >/dev/null 2>&1; cat mtotal.json" > $S/$label.total.json
+$SSH root@${LGS[0]} "cd /root && ./mload/mload -merge -out mtotal.json $(seq -f m%g.json 0 $((${#LGS[@]}-1)) | tr '\n' ' ') >/dev/null 2>&1; cat mtotal.json" > $S/$label.total.json
 python3 - "$label" "$sub" "$s0" "$s1" $S/$label.total.json <<'PY'
 import sys,json,re
 label,sub,s0,s1,f=sys.argv[1:6]
