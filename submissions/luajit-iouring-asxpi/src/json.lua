@@ -23,11 +23,19 @@ local s_esc = false     -- last string scanned had escapes
 local v_type = 0        -- type of the last value scanned
 local keybuf = ffi.new("uint8_t[64]")
 
-local function ws(i)
+-- Compact JSON has no whitespace, so the loop sits in a function of its own: a loop that is
+-- entered on every call and left at once never becomes a trace, the function around it gets
+-- blacklisted, and then no trace that calls it can be compiled either.
+local function ws_more(i)
   while true do
     local c = P[i]
     if c == 32 or c == 10 or c == 13 or c == 9 then i = i + 1 else return i end
   end
+end
+local function ws(i)
+  local c = P[i]
+  if c ~= 32 and c ~= 10 and c ~= 13 and c ~= 9 then return i end
+  return ws_more(i + 1)
 end
 
 local function hex(c)
@@ -37,9 +45,8 @@ local function hex(c)
   return -1
 end
 
--- i is just past the opening quote; returns the index of the closing quote, or -1
-local function str(i)
-  s_esc = false
+-- the rest of a string from its first backslash on; returns the index of the closing quote, or -1
+local function str_more(i)
   while true do
     local c = P[i]
     if c == 34 then return i end
@@ -59,6 +66,19 @@ local function str(i)
       i = i + 1
     end
   end
+end
+
+-- i is just past the opening quote; returns the index of the closing quote, or -1.
+-- The run up to the quote, a backslash or a control byte is found by the shim's scan: the keys
+-- and values here are a few bytes long, and a loop that short rarely completes a trace.
+local shim, PN
+local function str(i)
+  s_esc = false
+  local k = i + shim.td_json_clean(P + i, PN - i)
+  local c = P[k]                      -- P[PN] is the terminating zero
+  if c == 34 then return k end
+  if c ~= 92 then return -1 end
+  return str_more(k)
 end
 
 local function num(i)
@@ -200,7 +220,7 @@ M.decode = decode
 -- of each as a top-level member is recorded in vtype/vstart/vend/vesc (the last duplicate wins).
 -- Returns the type of the top-level value, or 0 if the document is malformed.
 function M.scan(p, n, keys, nkeys)
-  P = p
+  P = p; PN = n
   for k = 0, nkeys - 1 do vtype[k] = 0 end
   local i = ws(0)
   if P[i] ~= 123 then
@@ -285,69 +305,21 @@ local function escape_slow(dst, o, src, s, n)
 end
 
 
--- The fast path. Almost every string needs no escaping, so check first and copy in one piece:
--- up to 128 bytes are checked as overlapping unaligned 64-bit words in straight-line code (a word
--- flags its bytes below 0x20, '"' and '\\'), and anything flagged or longer takes the loop above.
--- The code is generated so that it calls no helper: a helper function becomes a trace of its own.
--- A string shorter than 8 bytes is read as one word: src needs 7 readable bytes after it.
-do
-  local function chk(x)
-    return ("bor(band(%s - L20, bnot(%s)), band(bxor(%s, L22) - L01, bnot(bxor(%s, L22))), band(bxor(%s, L5c) - L01, bnot(bxor(%s, L5c))))")
-      :format(x, x, x, x, x, x)
-  end
-  local function words(n)
-    local t, e = {}, {}
-    for i = 0, n - 1 do t[#t + 1] = ("local x%d, y%d = q[%d], t[%d]"):format(i, i, i, i) end
-    for i = 0, n - 1 do e[#e + 1] = chk("x" .. i); e[#e + 1] = chk("y" .. i) end
-    while #e > 1 do
-      local f = {}
-      for i = 1, #e, 2 do f[#f + 1] = e[i + 1] and ("bor(" .. e[i] .. ", " .. e[i + 1] .. ")") or e[i] end
-      e = f
-    end
-    return table.concat(t, "\n    ") .. "\n    acc = " .. e[1]
-  end
-  local code = [[
-local ffi, bit, slow = ...
-local band, bor, bxor, bnot, lshift = bit.band, bit.bor, bit.bxor, bit.bnot, bit.lshift
-local cast, copy = ffi.cast, ffi.copy
-local u64p = ffi.typeof("const uint64_t *")
-local L20, L22, L5c = 0x2020202020202020ULL, 0x2222222222222222ULL, 0x5c5c5c5c5c5c5c5cULL
-local L01, L80, ONES = 0x0101010101010101ULL, 0x8080808080808080ULL, 0xffffffffffffffffULL
-return function(dst, o, src, s, n)
-  if n > 128 then return slow(dst, o, src, s, n) end
-  if n == 0 then return o end
-  local p = src + s
-  local q = cast(u64p, p)
-  local acc
-  if n < 8 then
-    local x0 = bor(q[0], lshift(ONES, 8 * n))
-    acc = ]] .. chk("x0") .. [[
-
-  elseif n <= 16 then
-    local t = cast(u64p, p + (n - 8))
-    ]] .. words(1) .. [[
-
-  elseif n <= 32 then
-    local t = cast(u64p, p + (n - 16))
-    ]] .. words(2) .. [[
-
-  elseif n <= 64 then
-    local t = cast(u64p, p + (n - 32))
-    ]] .. words(4) .. [[
-
-  else
-    local t = cast(u64p, p + (n - 64))
-    ]] .. words(8) .. [[
-
-  end
-  if band(acc, L80) == 0 then
-    copy(dst + o, p, n)
-    return o + n
-  end
-  return slow(dst, o, src, s, n)
-end
-]]
-  M.escape = assert(loadstring(code, "=json.escape"))(ffi, bit, escape_slow)
+-- The fast path. Almost every string needs no escaping, so find the clean prefix with one call
+-- into the shim (a byte scan, eight bytes at a time) and copy it in one piece; the loop above
+-- takes whatever follows the first byte that needs escaping.
+--
+-- This was Lua for a while: overlapping 64-bit words in generated straight-line code, branching
+-- on the length. It was fast in isolation, but inlined into the feed loop its branches became
+-- side traces that LuaJIT could not link back to the loop ("NYI: register coalescing too
+-- complex"). It kept retrying, and whether the hot loop ended up compiled was a matter of luck:
+-- the same build ran at 22 or at 60-100 us per request. A call into C is a fixed boundary.
+function M.init(lib) shim = lib end
+function M.escape(dst, o, src, s, n)
+  local k = shim.td_json_clean(src + s, n)
+  if k > 0 then ffi.copy(dst + o, src + s, k) end
+  if k == n then return o + n end
+  return escape_slow(dst, o + k, src, s + k, n - k)
 end
 
 -- Appends a non-negative integer (below 2^53) in decimal. Returns the new offset.

@@ -793,6 +793,7 @@ end
 
 function M.init(lib, secret)
   shim = lib
+  json.init(lib)
   sha.set_key(secret)
 end
 

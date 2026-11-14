@@ -224,3 +224,66 @@ six IPv4 addresses, 0.34 ms from the box (the Linodes are 17 ms away).
   of any number of generators.
 - The five Linode generators were deleted the same day; the last files from the first one are
   in `bench/box-logs/linode-lg1/`. Runs up to section 10 came from them.
+
+### 12. First 280k runs from the new generator: the generator is the limit above ~200k
+
+Box, v3 and Rust at 280k from the generator in the box's datacenter.
+
+| Run | Ramp | µs/req (user / sys) | Overall p95 | Failed |
+|---|---|---|---:|---:|
+| `n280-v3` | 60 s | 30.07 (8.98 / 21.09) | 21.0 s | 0.06% |
+| `n280-rust` | 60 s | 26.19 (8.14 / 18.05) | 18.8 s | 0% |
+| `m280-v3` (stats on) | 180 s | 25.84 (9.47 / 16.37) | 21.2 s | 0.01% |
+| `m280-rust` | 180 s | 24.53 (8.33 / 16.19) | 15.4 s | 0.005% |
+
+- With the 180 s ramp both servers were healthy up to 187k users (19.9k req/s; p95 21 ms for
+  Lua, 6 ms for Rust) and both stalled at the same moment near 210k users, while the box was
+  under 45% busy. The generator's load average was 25–36 on 8 shared vCPUs: above about 200k
+  users this rig measures the generator. Latency from these runs says nothing about either
+  server.
+- With the 60 s ramp the generator was already behind after a minute (204k of 280k users
+  started). At the end of that run Rust was serving 30.3k req/s at p95 20 ms; Lua v3 was at
+  21.2k req/s and p95 7.6 s.
+- CPU per request is still valid: Lua v3 uses about 5% more than Rust at equal load, with the
+  same kernel time and about 1.1 µs more user time.
+- To do: give the generator 16 vCPUs (the five Linodes had 20 between them) or a lighter tool.
+
+### 13. The generated `escape` made the JIT unstable; replaced by a scan in the shim (kept)
+
+Found on the laptop while preparing the next change: the same build ran at 22–23 µs/req in one
+run and at 37–105 in the next.
+
+| Build | Runs | Normal | Slow |
+|---|---:|---:|---:|
+| baseline (byte loop) | 2 | 2 (24.7) | 0 |
+| generated `escape` (`5011927`) | 2 | 2 (22.9) | 0 |
+| + integer formatting (`13098b9`) | 2 | 1 (22.8) | 1 (36.9) |
+| v3 (`65e7fc8`) | 2 | 1 (22.8) | 1 (51.6) |
+| v3, `escape` reworked to keep fewer values live | 13 | 8 (22.0–24.6) | 5 (39–105) |
+| scan in the shim | 8 | 8 (22.3–24.5) | 0 |
+| + JSON reader changes below | 6 | 6 (22.6–23.3) | 0 |
+
+Cause, from `luajit -jv` logs: in slow runs LuaJIT aborts 1,000–2,200 traces in 20 s with "NYI:
+register coalescing too complex", all side traces that start inside the generated `escape`
+(its branches on the string length) and have to link back into the feed loop. It never
+succeeds and never gives up, so that path stays in the interpreter, FFI calls included. In
+normal runs the traces happen to form in an order that avoids it. This is the "collapse" of
+section 5 (user time 23 µs/req on the box) and probably part of sections 7 and 8.
+
+Changes:
+
+- `td_json_clean` in `shim.c`: the length of the prefix of a string that needs no escaping (a
+  byte scan, eight bytes at a time). `json.escape` calls it and copies that prefix in one
+  piece; the byte loop takes the rest. A C call is a fixed boundary for the JIT. The shim is no
+  longer "no JSON in C": this one scan is.
+- JSON reader: the whitespace loop moved out of `ws` (it was entered on every call and left at
+  once, so `ws` got blacklisted and no trace calling it could be compiled), and string scanning
+  uses the same shim scan up to the first backslash. Compared with the old reader on 600k
+  generated inputs: identical results.
+- After both: no trace is blacklisted any more, 24–37 aborts per run (was 84–124), no
+  "register coalescing" aborts in 14 runs.
+- Tests 42/42. Speed in the laptop runs is that of the generated version's good mode.
+
+Lessons: a microbenchmark and three A/B rounds did not show this; it needed repeated runs of the
+whole server. From now on a change to hot Lua code is run at least six times with `-jv`, and the
+abort and blacklist counts are part of the result.

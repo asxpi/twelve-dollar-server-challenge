@@ -2,9 +2,10 @@
  * The only C in this submission: a thin layer over the unmodified SQLite amalgamation.
  *
  * It exposes SQLite's own B-tree cursor API (seek, first, next, previous, payload) and five prepared
- * statements to LuaJIT. No HTTP, JSON, JWT or record decoding happens here: Lua gets the record
- * bytes SQLite returns and does the rest. Nothing here writes SQLite's private structs; cursors
- * are only moved through sqlite3Btree* functions.
+ * statements to LuaJIT. No HTTP, JWT or record decoding happens here: Lua gets the record bytes
+ * SQLite returns and does the rest. The one exception is td_json_clean, a byte scan that tells
+ * the JSON writer how much of a string needs no escaping. Nothing here writes SQLite's private
+ * structs; cursors are only moved through sqlite3Btree* functions.
  *
  * WAL checkpoints run on a second thread with its own connection, so the event loop never waits
  * for their fsyncs. Both connections use SQLite's "unix-excl" VFS: the process owns the file and
@@ -346,6 +347,24 @@ int td_health(void) {
   int rc = sqlite3_step(st_health);
   sqlite3_reset(st_health);
   return rc == SQLITE_ROW ? 0 : fail("health", rc);
+}
+
+/* Length of the prefix of p[0 .. n) that JSON can take as it is: up to the first byte below 0x20,
+   '"' or '\\'. Eight bytes at a time: a word is flagged if any of its bytes is one of those. */
+int td_json_clean(const uint8_t *p, int n) {
+  const uint64_t L01 = 0x0101010101010101ULL, L80 = 0x8080808080808080ULL;
+  int i = 0;
+  for (; i + 8 <= n; i += 8) {
+    uint64_t x;
+    memcpy(&x, p + i, 8);
+    uint64_t y = x ^ (L01 * 0x22), z = x ^ (L01 * 0x5c);
+    if ((((x - L01 * 0x20) & ~x) | ((y - L01) & ~y) | ((z - L01) & ~z)) & L80) break;
+  }
+  for (; i < n; i++) {
+    uint8_t c = p[i];
+    if (c < 0x20 || c == '"' || c == '\\') break;
+  }
+  return i;
 }
 
 /* frames in the WAL after the last write commit */
