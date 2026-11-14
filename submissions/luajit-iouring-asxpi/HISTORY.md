@@ -397,3 +397,32 @@ requests, 23.47 µs/req (user 7.41, sys 16.06), box 73% busy, peak RAM 1,596 MB.
   The latency figures do not follow the load: single runs vary too much to rank loads 5% apart.
 - Rust's peak memory was 1,160 MB at 265k and 1,596 MB here, so peak memory varies between
   runs too; the 500 MB gap noted for Lua in section 19 is not established.
+
+### 22. One write per commit, a sync after the first checkpoint round, old log pages dropped (kept, not yet run on the box)
+
+All in `shim.c`; no Lua on the request path changes.
+
+- **One write per commit.** A VFS over `unix-excl` (SQLite's public VFS interface) that changes
+  only the WAL file's writes: while COMMIT runs, contiguous writes are collected and go to the
+  file when the commit frame's page arrives, still inside SQLite's own write call, so the commit
+  is in the kernel before SQLite publishes it in the WAL index. Every read, size query, sync,
+  truncate and close writes the buffer out first. `TD_WALBUF=0` turns it off. The recipe is the
+  one `fsharp-uring-delneg` describes (290k to 300k on the leaderboard with this and a
+  page-cache change).
+  - Measured on the laptop with `strace`, 32 connections creating posts for 4 s: 17,521 `pwrite`
+    calls without it, 1,264 with it, for the same number of posts.
+  - Crash test: six runs of 48 writers with the server killed by `kill -9` at a random moment
+    and checkpoints every 256 frames. All 18,288 posts and 8,988 likes acknowledged before the
+    kill were in the database afterwards; `integrity_check` ok every time.
+- **Sync after an incomplete round.** SQLite syncs the database file only at the end of a
+  checkpoint round that copied the whole log, which here is the round that runs while writes
+  are held. The checkpoint thread now calls `fdatasync` itself after a round that did not
+  finish, off the loop, so the sync inside the hold has little left to write.
+- **Old log pages.** After a round that copied the whole log the thread tells the kernel it may
+  drop the WAL's cached pages (`posix_fadvise(DONTNEED)`), so a long log does not stay in
+  memory.
+- Tests 42/42.
+
+Left out for now: the page-cache change of the same entry (after certain B-tree splits pcache1
+scans its whole hash table at the next commit; 2.5% of CPU there with a 256 MB cache, expected
+well under 1% with 64 MB here).
