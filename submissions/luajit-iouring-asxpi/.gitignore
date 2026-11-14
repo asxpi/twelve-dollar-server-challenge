@@ -2,8 +2,4 @@ vendor/
 libtdshim.so
 bench/hosts.env
 bench/db/
-bench/*.log
-bench/*.txt
-bench/results/*.lg[0-9].json
-bench/results/*.log
 bench/orig*/

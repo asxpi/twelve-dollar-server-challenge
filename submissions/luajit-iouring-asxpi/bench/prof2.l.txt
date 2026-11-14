@@ -1,0 +1,53 @@
+43%  main.lua:ring_enter < main.lua:main
+  -- 99%  main.lua:261
+ 9%  app.lua:post_emit < app.lua:get_feed
+  -- 96%  app.lua:190
+ 7%  main.lua:main < main.lua:0
+  -- 96%  main.lua:751
+ 6%  app.lua:get_feed < app.lua:handle
+  -- 17%  app.lua:310
+  -- 16%  app.lua:325
+  -- 14%  app.lua:300
+  -- 10%  app.lua:343
+  -- 10%  app.lua:286
+  --  9%  app.lua:333
+  --  9%  app.lua:345
+  --  9%  app.lua:337
+ 4%  app.lua:post_object < app.lua:get_post
+  -- 51%  app.lua:190
+  -- 33%  app.lua:216
+  -- 15%  app.lua:205
+ 3%  json.escape:escape < app.lua:post_emit
+  -- 30%  json.escape:42
+  -- 15%  json.escape:46
+  -- 12%  json.escape:22
+  --  9%  json.escape:10
+  --  9%  json.escape:40
+  --  6%  json.escape:24
+  --  3%  json.escape:35
+  --  3%  json.escape:17
+  --  3%  json.escape:39
+  --  3%  json.escape:34
+  --  3%  json.escape:37
+  --  3%  json.escape:21
+ 3%  json.lua:uint < app.lua:post_emit
+  -- 53%  json.lua:359
+  -- 33%  json.lua:360
+  -- 10%  json.lua:363
+  --  3%  json.lua:364
+ 3%  app.lua:like_post < app.lua:handle
+  -- 100%  app.lua:374
+ 3%  app.lua:create_post < app.lua:handle
+  -- 86%  app.lua:449
+  -- 11%  app.lua:420
+  --  4%  app.lua:432
+ 3%  sha256.lua:compress < sha256.lua:finish
+  -- 33%  sha256.lua:43
+  -- 22%  sha256.lua:38
+  -- 11%  sha256.lua:45
+  -- 11%  sha256.lua:37
+  --  7%  sha256.lua:32
+  --  4%  sha256.lua:46
+  --  4%  sha256.lua:36
+  --  4%  sha256.lua:39
+  --  4%  sha256.lua:48
