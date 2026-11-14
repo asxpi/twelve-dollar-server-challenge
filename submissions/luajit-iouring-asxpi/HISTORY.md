@@ -410,3 +410,15 @@ Box, organiser's protocol (60 s ramp, 5-minute hold), healthy generator.
   a few seconds at a time.
 - Lua peaks 500 MB above Rust in memory, on a 1,967 MB box. Not yet explained.
 - Neither server passes the organiser's thresholds on this rig at 265k.
+
+### 20. Rust at 250k: a clean hold, a rough ramp
+
+Box, organiser's protocol (`r250-rust`): 24,269 req/s, p95 172 ms, p99 4.41 s, no failed
+requests, 23.47 µs/req (user 7.41, sys 16.06), box 73% busy, peak RAM 1,596 MB.
+
+- From 120 s on nearly every 20-second sample had p95 between 12 and 130 ms. The overall p99
+  comes from the ramp (4–5 s while 250k users arrived in 60 s) and two spikes.
+- Rust on this rig: 250k p95 172 ms / p99 4.41 s; 265k 2.68 s / 6.31 s; 280k 943 ms / 4.15 s.
+  The latency figures do not follow the load: single runs vary too much to rank loads 5% apart.
+- Rust's peak memory was 1,160 MB at 265k and 1,596 MB here, so peak memory varies between
+  runs too; the 500 MB gap noted for Lua in section 19 is not established.
