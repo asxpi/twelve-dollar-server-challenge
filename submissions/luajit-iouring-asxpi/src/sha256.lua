@@ -27,26 +27,48 @@ end
 
 local W = ffi.new("int32_t[64]")
 
--- one 64-byte block at p[off] into state H
-local function compress(H, p, off)
-  for i = 0, 15 do
-    local j = off + i * 4
-    W[i] = bor(lshift(p[j], 24), lshift(p[j + 1], 16), lshift(p[j + 2], 8), p[j + 3])
+-- One 64-byte block at p[off] into state H.
+--
+-- The 64 rounds are a loop of 8 iterations with 8 rounds written out in each. After 8 rounds the
+-- eight working variables are back under their own names, so the usual h = g; g = f; ... shuffle
+-- of every round disappears, and the trace of the loop body stays well inside LuaJIT's default
+-- limits (all 64 rounds written out are 2.5 times faster too, but only with the trace-length
+-- limits raised for the whole process). The body is generated: it is the same two lines eight
+-- times with the variables rotated.
+local compress
+do
+  local t = {
+    "local bit, K, W = ...",
+    "local band, bor, bxor, bnot, ror, rshift, lshift, tobit = bit.band, bit.bor, bit.bxor, bit.bnot, bit.ror, bit.rshift, bit.lshift, bit.tobit",
+    "return function(H, p, off)",
+    "  for i = 0, 15 do",
+    "    local j = off + i * 4",
+    "    W[i] = bor(lshift(p[j], 24), lshift(p[j + 1], 16), lshift(p[j + 2], 8), p[j + 3])",
+    "  end",
+    "  for i = 16, 63 do",
+    "    local x, y = W[i - 15], W[i - 2]",
+    "    W[i] = tobit(W[i - 16] + bxor(ror(x, 7), ror(x, 18), rshift(x, 3)) + W[i - 7] + bxor(ror(y, 17), ror(y, 19), rshift(y, 10)))",
+    "  end",
+    "  local a, b, c, d, e, f, g, h = H[0], H[1], H[2], H[3], H[4], H[5], H[6], H[7]",
+    "  for i = 0, 56, 8 do",
+    "    local t1, t2",
+  }
+  local v = { "a", "b", "c", "d", "e", "f", "g", "h" }
+  for r = 0, 7 do
+    local A, B, C, D, E, F, G, Hh = v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8]
+    t[#t + 1] = ("    t1 = %s + bxor(ror(%s, 6), ror(%s, 11), ror(%s, 25)) + bxor(band(%s, %s), band(bnot(%s), %s)) + K[i + %d] + W[i + %d]")
+      :format(Hh, E, E, E, E, F, E, G, r, r)
+    t[#t + 1] = ("    t2 = bxor(ror(%s, 2), ror(%s, 13), ror(%s, 22)) + bxor(band(%s, %s), band(%s, %s), band(%s, %s))")
+      :format(A, A, A, A, B, A, C, B, C)
+    t[#t + 1] = ("    %s = tobit(%s + t1)"):format(D, D)
+    t[#t + 1] = ("    %s = tobit(t1 + t2)"):format(Hh)
+    v = { Hh, A, B, C, D, E, F, G }      -- the new a is in h's variable, the new e in d's
   end
-  for i = 16, 63 do
-    local x, y = W[i - 15], W[i - 2]
-    W[i] = tobit(W[i - 16] + bxor(ror(x, 7), ror(x, 18), rshift(x, 3)) + W[i - 7]
-      + bxor(ror(y, 17), ror(y, 19), rshift(y, 10)))
-  end
-  local a, b, c, d, e, f, g, h = H[0], H[1], H[2], H[3], H[4], H[5], H[6], H[7]
-  for i = 0, 63 do
-    local t1 = h + bxor(ror(e, 6), ror(e, 11), ror(e, 25)) + bxor(band(e, f), band(bnot(e), g)) + K[i] + W[i]
-    local t2 = bxor(ror(a, 2), ror(a, 13), ror(a, 22)) + bxor(band(a, b), band(a, c), band(b, c))
-    h = g; g = f; f = e; e = tobit(d + t1)
-    d = c; c = b; b = a; a = tobit(t1 + t2)
-  end
-  H[0] = tobit(H[0] + a); H[1] = tobit(H[1] + b); H[2] = tobit(H[2] + c); H[3] = tobit(H[3] + d)
-  H[4] = tobit(H[4] + e); H[5] = tobit(H[5] + f); H[6] = tobit(H[6] + g); H[7] = tobit(H[7] + h)
+  assert(v[1] == "a" and v[8] == "h")
+  t[#t + 1] = "  end"
+  for i = 0, 7 do t[#t + 1] = ("  H[%d] = tobit(H[%d] + %s)"):format(i, i, v[i + 1]) end
+  t[#t + 1] = "end"
+  compress = assert(loadstring(table.concat(t, "\n"), "=sha256.compress"))(bit, K, W)
 end
 
 local tailbuf = ffi.new("uint8_t[128]")
