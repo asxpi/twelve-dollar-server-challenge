@@ -422,3 +422,24 @@ requests, 23.47 µs/req (user 7.41, sys 16.06), box 73% busy, peak RAM 1,596 MB.
   The latency figures do not follow the load: single runs vary too much to rank loads 5% apart.
 - Rust's peak memory was 1,160 MB at 265k and 1,596 MB here, so peak memory varies between
   runs too; the 500 MB gap noted for Lua in section 19 is not established.
+
+### 21. Users cursors on the box at 265k (this branch)
+
+Box, organiser's protocol, stats on (`u265-v6u`), next to the two runs of section 19.
+
+| 265k users | v6 + users cursors | v6 | Rust |
+|---|---:|---:|---:|
+| Requests/s | 25,478 | 25,313 | 25,119 |
+| p95 / p99 | 888 ms / 3.61 s | 1.22 s / 3.51 s | 2.68 s / 6.31 s |
+| Failed requests | 0 | 0 | 0 |
+| µs/req | 25.06 | 25.09 | 25.13 |
+| user / sys | 6.12 / 18.94 | 7.03 / 18.06 | 7.27 / 17.86 |
+| Peak RAM | 1,376 MB | 1,678 MB | 1,160 MB |
+| Longest hold / commit | 1.0 s / 161 ms | 4.8 s / 3.4 s | – |
+
+- User time per request drops from 7.03 to 6.12 µs (13%), now 1.15 µs below Rust.
+- Total CPU per request does not move. At this load the core is full (79% busy plus interrupt
+  work), and the time the server no longer uses is charged to it as kernel time for interrupts.
+  At saturation µs/req cannot tell these builds apart; user time and latency can.
+- After the ramp (from 120 s) p95 was 40–380 ms in every sample but one (2.4 s at 200 s).
+- Checkpoints: 69 holds ended unfinished, log peak 57,597 frames.
