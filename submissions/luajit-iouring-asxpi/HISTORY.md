@@ -12,6 +12,24 @@ Conventions:
 - Laptop numbers were taken on battery at a 2.0 GHz cap over loopback. They are only good for
   comparing two runs of the same series.
 
+## Sources and credits
+
+- **[rust-iouring-kensac](https://github.com/arjaythedev/twelve-dollar-server-challenge/tree/main/submissions/rust-iouring-kensac)**
+  (PR #264, #1 at 310k): the design this server follows. `shim.c` shares 10 of its function names
+  and 23 of its 180 non-trivial lines with that entry's `csrc/shim.c`, and the event loop uses the
+  same scheme (direct descriptors over several rings, eight `SO_REUSEPORT` listeners, drain-first
+  with a 16,384 / 2,048 cap, checkpoint thread with a 250 ms write hold). It is also the entry
+  every measurement here is compared against.
+- **[c-iouring-pavlyhalim](https://github.com/arjaythedev/twelve-dollar-server-challenge/tree/main/submissions/c-iouring-pavlyhalim)**
+  (PR #245, 295k): the C entry installed on the test box as a reference. Its code shares
+  nothing with this server's shim (one line in common).
+- `mload`, the load generator on the box rig, comes from
+  [c-uring-willwang](https://github.com/arjaythedev/twelve-dollar-server-challenge/tree/main/submissions/c-uring-willwang)'s
+  `tests/official/mload`.
+
+The organiser ruled on 2026-11-04 that building on another entry is fine when the README
+credits it, so the PR's README must name rust-iouring-kensac.
+
 ## 2026-11-14
 
 ### 0. Baseline
