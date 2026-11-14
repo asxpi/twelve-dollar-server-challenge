@@ -306,3 +306,20 @@ root-to-leaf descents per feed request.
 - Tests 42/42. Laptop, six runs each with `-jv`: 21.0–23.5 µs/req (mean 21.9) against
   22.6–23.3 (mean 22.9) for the same code without it, about 4% less. No blacklisted traces, no
   "register coalescing" aborts. Not yet measured on the box.
+
+### 15. SHA-256 with eight rounds per loop iteration (kept)
+
+HS256 verification was 3% of CPU: about 5 µs per token on the laptop, 8 µs on the box.
+
+- Tried first: all 64 rounds written out as one block of generated code. 1.9 µs per token, but
+  LuaJIT refuses it with "trace too long" unless `maxrecord` and `maxirconst` are raised for the
+  whole process, which changes how every other trace forms. Not used.
+- Kept: a loop of 8 iterations with 8 rounds written out in each. After 8 rounds the working
+  variables are back under their own names, so the per-round shuffle disappears. 2.0 µs per
+  150-byte token against 5.1, with the default JIT limits.
+- Verified: one published HMAC-SHA256 test vector, and equal output to the previous
+  implementation on 450k random inputs with three key lengths. Tests 42/42.
+- Stability series, laptop, eight runs with `-jv`: 22.4–23.4 µs/req (mean 22.9), no blacklisted
+  traces, no "register coalescing" aborts, 25–54 aborts per run. The six runs before the change
+  were 22.6–23.3 (mean 22.9): the gain for the whole server is inside the noise here, as expected
+  for something that is 3% of CPU and only on writes.
