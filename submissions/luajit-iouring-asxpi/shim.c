@@ -25,6 +25,9 @@ static Btree *bt;
 static Pgno root[NCUR];
 static KeyInfo *keyinfo[NCUR];
 static BtCursor *cur[NCUR];
+/* One more users cursor per feed slot (see td_user_row). */
+#define NUCUR 20
+static BtCursor *ucur[NUCUR];
 static int in_txn;
 static UnpackedRecord *likes_key;
 static sqlite3_stmt *st_begin, *st_commit, *st_rollback, *st_post, *st_like, *st_health;
@@ -164,6 +167,10 @@ int td_open(const char *path, int cache_kb, int autockpt) {
     cur[i] = sqlite3_malloc(sqlite3BtreeCursorSize());
     if (!cur[i]) return fail("cursor", 0);
   }
+  for (int i = 0; i < NUCUR; i++) {
+    ucur[i] = sqlite3_malloc(sqlite3BtreeCursorSize());
+    if (!ucur[i]) return fail("cursor", 0);
+  }
 
 #define PREP(st, q) if ((rc = sqlite3_prepare_v3(db, q, -1, SQLITE_PREPARE_PERSISTENT, &st, 0))) return fail(q, rc)
   PREP(st_begin, "BEGIN");
@@ -177,6 +184,7 @@ int td_open(const char *path, int cache_kb, int autockpt) {
 
 static void close_cursors(void) {
   for (int i = 0; i < NCUR; i++) sqlite3BtreeCloseCursor(cur[i]);
+  for (int i = 0; i < NUCUR; i++) sqlite3BtreeCloseCursor(ucur[i]);
 }
 
 /* One transaction per event-loop pass: reads share a snapshot, writes are group-committed. */
@@ -191,6 +199,16 @@ int td_begin(void) {
     rc = sqlite3BtreeCursor(bt, root[i], 0, keyinfo[i], cur[i]);
     if (rc) {
       for (int j = 0; j < i; j++) sqlite3BtreeCloseCursor(cur[j]);
+      sqlite3_step(st_rollback); sqlite3_reset(st_rollback);
+      return fail("cursor", rc);
+    }
+  }
+  for (int i = 0; i < NUCUR; i++) {
+    sqlite3BtreeCursorZero(ucur[i]);
+    rc = sqlite3BtreeCursor(bt, root[C_USERS], 0, 0, ucur[i]);
+    if (rc) {
+      for (int j = 0; j < NCUR; j++) sqlite3BtreeCloseCursor(cur[j]);
+      for (int j = 0; j < i; j++) sqlite3BtreeCloseCursor(ucur[j]);
       sqlite3_step(st_rollback); sqlite3_reset(st_rollback);
       return fail("cursor", rc);
     }
@@ -230,6 +248,28 @@ int td_row(int c, int64_t rowid, uint8_t *buf, uint32_t cap) {
   if (sqlite3BtreeTableMoveto(cur[c], rowid, 0, &res)) return -1;
   if (res) return 0;
   return payload(c, buf, cap);
+}
+
+/* The users row `rowid` through users cursor `k` (0 .. NUCUR-1), like td_row.
+ *
+ * The feed looks up twenty authors per request, a root-to-leaf descent each. Within one
+ * transaction the feed's posts, and so their authors, are mostly the same from one request to the
+ * next. The caller gives every feed post its own cursor (post id modulo NUCUR), so the next
+ * request usually asks a cursor for the row it is already on, and sqlite3BtreeTableMoveto returns
+ * at once: its own "already there" check, nothing done here. The record is fetched from SQLite's
+ * page for every request, as with any other cursor; only the cursor's position is kept, and only
+ * until the transaction ends (the cursors are closed at COMMIT). */
+int td_user_row(int k, int64_t rowid, uint8_t *buf, uint32_t cap) {
+  BtCursor *c = ucur[k];
+  int res;
+  if (sqlite3BtreeTableMoveto(c, rowid, 0, &res)) return -1;
+  if (res) return 0;
+  u32 amt, sz = sqlite3BtreePayloadSize(c);
+  if (sz == 0 || sz > cap) return -1;
+  const void *d = sqlite3BtreePayloadFetch(c, &amt);
+  if (amt >= sz) memcpy(buf, d, sz);
+  else if (sqlite3BtreePayload(c, 0, sz, buf)) return -1;
+  return (int)sz;
 }
 
 /* 1 = row exists */

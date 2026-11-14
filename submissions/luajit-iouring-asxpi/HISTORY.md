@@ -287,3 +287,22 @@ Changes:
 Lessons: a microbenchmark and three A/B rounds did not show this; it needed repeated runs of the
 whole server. From now on a change to hot Lua code is run at least six times with `-jv`, and the
 abort and blacklist counts are part of the result.
+
+### 14. Users cursor per feed slot (this branch only: `luajit-iouring-asxpi-usercursors`)
+
+The users seek was the largest user-space item left (9% of CPU in the feed, section 6): twenty
+root-to-leaf descents per feed request.
+
+- `shim.c` opens twenty more cursors on the users table per transaction. The feed gives each
+  post its own cursor (post id modulo 20) through `td_user_row`. Within a transaction the feed's
+  posts are mostly the same from one request to the next, so a cursor is usually asked for the
+  row it is already on and `sqlite3BtreeTableMoveto` returns at once.
+- What is kept between requests is a cursor's position, until COMMIT. The record bytes are read
+  from SQLite's page for every request.
+- **Rule 5 question.** This relies on state left by an earlier request in the same transaction.
+  Other entries rely on the same `TableMoveto` shortcut for consecutive ids within one request;
+  across requests is a step further. It lives on its own branch so that either version can be
+  submitted, and it has to be stated plainly in the README if this one is.
+- Tests 42/42. Laptop, six runs each with `-jv`: 21.0–23.5 µs/req (mean 21.9) against
+  22.6–23.3 (mean 22.9) for the same code without it, about 4% less. No blacklisted traces, no
+  "register coalescing" aborts. Not yet measured on the box.

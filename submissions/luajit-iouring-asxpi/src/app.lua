@@ -160,8 +160,9 @@ end
 
 -- Appends the post object for the posts record in `rec` (row `id`), or returns nil if its author row,
 -- which the reference query's JOIN needs, doesn't exist. Returns false on a database error.
--- `likes` is the like count if the caller already has it, else -1.
-local function post_emit(o, id, likes)
+-- `likes` is the like count if the caller already has it, else -1. `uc` is the users cursor to
+-- look the author up with (0 .. 19, see td_user_row in shim.c), or -1 for the shared one.
+local function post_emit(o, id, likes, uc)
   local p = rec
   -- posts record: (id = NULL, the rowid), user_id, body, created_at
   local hdr, i = varint(p, 0)
@@ -186,7 +187,8 @@ local function post_emit(o, id, likes)
   o = escape(resp, o, rec, d + nbody, ncreated)
   o = lit(o, '","author":"')
 
-  local r = shim.td_row(C_USERS, uid, urec, REC_CAP)
+  local r
+  if uc >= 0 then r = shim.td_user_row(uc, uid, urec, REC_CAP) else r = shim.td_row(C_USERS, uid, urec, REC_CAP) end
   if r <= 0 then
     if r < 0 then return false end
     return nil
@@ -217,7 +219,7 @@ local function post_object(o, id)
     if r < 0 then return false end
     return nil
   end
-  return post_emit(o, id, -1)
+  return post_emit(o, id, -1, -1)
 end
 
 local function ensure_txn()
@@ -344,7 +346,7 @@ local function get_feed()
       until rid <= id
       if rid ~= id then return get_feed_slow() end
     end
-    local e = post_emit(o, id, feed_likes[id - lo])
+    local e = post_emit(o, id, feed_likes[id - lo], id % 20)
     if not e then
       if e == false then return fixed(R_INTERNAL) end
       return get_feed_slow()
