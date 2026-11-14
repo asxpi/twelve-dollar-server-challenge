@@ -261,7 +261,7 @@ ffi.copy(hexb, HEX, 16)
 -- Appends src[s .. s+n) to dst at `o` as the inside of a JSON string, escaping what
 -- JSON.stringify escapes. Returns the new offset. Worst case 6 output bytes per input byte.
 -- Buffers and offsets, never a derived pointer: nothing here allocates.
-function M.escape(dst, o, src, s, n)
+local function escape_slow(dst, o, src, s, n)
   for i = s, s + n - 1 do
     local c = src[i]
     if c >= 32 and c ~= 34 and c ~= 92 then
@@ -282,6 +282,72 @@ function M.escape(dst, o, src, s, n)
     end
   end
   return o
+end
+
+
+-- The fast path. Almost every string needs no escaping, so check first and copy in one piece:
+-- up to 128 bytes are checked as overlapping unaligned 64-bit words in straight-line code (a word
+-- flags its bytes below 0x20, '"' and '\\'), and anything flagged or longer takes the loop above.
+-- The code is generated so that it calls no helper: a helper function becomes a trace of its own.
+-- A string shorter than 8 bytes is read as one word: src needs 7 readable bytes after it.
+do
+  local function chk(x)
+    return ("bor(band(%s - L20, bnot(%s)), band(bxor(%s, L22) - L01, bnot(bxor(%s, L22))), band(bxor(%s, L5c) - L01, bnot(bxor(%s, L5c))))")
+      :format(x, x, x, x, x, x)
+  end
+  local function words(n)
+    local t, e = {}, {}
+    for i = 0, n - 1 do t[#t + 1] = ("local x%d, y%d = q[%d], t[%d]"):format(i, i, i, i) end
+    for i = 0, n - 1 do e[#e + 1] = chk("x" .. i); e[#e + 1] = chk("y" .. i) end
+    while #e > 1 do
+      local f = {}
+      for i = 1, #e, 2 do f[#f + 1] = e[i + 1] and ("bor(" .. e[i] .. ", " .. e[i + 1] .. ")") or e[i] end
+      e = f
+    end
+    return table.concat(t, "\n    ") .. "\n    acc = " .. e[1]
+  end
+  local code = [[
+local ffi, bit, slow = ...
+local band, bor, bxor, bnot, lshift = bit.band, bit.bor, bit.bxor, bit.bnot, bit.lshift
+local cast, copy = ffi.cast, ffi.copy
+local u64p = ffi.typeof("const uint64_t *")
+local L20, L22, L5c = 0x2020202020202020ULL, 0x2222222222222222ULL, 0x5c5c5c5c5c5c5c5cULL
+local L01, L80, ONES = 0x0101010101010101ULL, 0x8080808080808080ULL, 0xffffffffffffffffULL
+return function(dst, o, src, s, n)
+  if n > 128 then return slow(dst, o, src, s, n) end
+  if n == 0 then return o end
+  local p = src + s
+  local q = cast(u64p, p)
+  local acc
+  if n < 8 then
+    local x0 = bor(q[0], lshift(ONES, 8 * n))
+    acc = ]] .. chk("x0") .. [[
+
+  elseif n <= 16 then
+    local t = cast(u64p, p + (n - 8))
+    ]] .. words(1) .. [[
+
+  elseif n <= 32 then
+    local t = cast(u64p, p + (n - 16))
+    ]] .. words(2) .. [[
+
+  elseif n <= 64 then
+    local t = cast(u64p, p + (n - 32))
+    ]] .. words(4) .. [[
+
+  else
+    local t = cast(u64p, p + (n - 64))
+    ]] .. words(8) .. [[
+
+  end
+  if band(acc, L80) == 0 then
+    copy(dst + o, p, n)
+    return o + n
+  end
+  return slow(dst, o, src, s, n)
+end
+]]
+  M.escape = assert(loadstring(code, "=json.escape"))(ffi, bit, escape_slow)
 end
 
 -- Appends a non-negative integer (below 2^53) in decimal. Returns the new offset.
