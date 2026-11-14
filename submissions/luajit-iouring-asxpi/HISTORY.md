@@ -600,3 +600,28 @@ out from the service's CPU total. The same kill at teardown happened to earlier 
 than the real test, but the server has too little memory headroom and this is the next thing to
 fix: find what the 283 MB is (output-buffer pool, six rings' buffers, stash buffers, the 64 MB
 page cache, allocator fragmentation) and cap it.
+
+### 28. The organiser's result: 250,000, rank 32, merged
+
+PR #436 at `cafb9a6`, benchmarked on the organiser's box with k6 (his benchmark agent's report):
+
+- **250,000 users held 5 minutes**: 24,064 req/s, p95 149.6 ms, p99 460.4 ms, 0 errors, 78% CPU,
+  30 µs/req, 1,187 MB peak. Tests 42/42. Merged; rank 32, tied with the other 250,000 entries.
+- Failed 2-minute probes, all with 0 errors: 260,000 on p99 (1.57 s at 81% CPU), 280,000 on p99
+  (14.5 s at 92% CPU), 320,000 on p99 (19.4 s at 97% CPU).
+
+Against what the test rig said (sections 19–26):
+
+- **In requests per second the rig was right about this server.** It held about 24k req/s there
+  and failed at about 25k; here it failed the thresholds at 25.7k req/s (265k `mload` users) with
+  p99 1.9–2.4 s.
+- **The rig was wrong about the comparison with Rust.** Here `rust-iouring-kensac` looked no
+  better than this server at equal load (25.1 against 23.1–23.5 µs/req, worse latency). On the
+  organiser's box it holds 310,000 at 25 µs/req and this server costs 30 µs/req: 20% more, not
+  level. The PR text said "about level with #264 under the same load"; that did not hold there.
+- So this server costs about 6 µs/req more on his rig than on this one, and Rust does not. The
+  two rigs differ in the load generator (k6 against `mload`; both send `Host` and `User-Agent`
+  only), the network path, and possibly the kernel build. Not explained yet. First check: drive
+  the test box with real k6 and with `mload` at the same user count and compare µs/req, with
+  `luajit -jv` on, since a JIT that compiles differently under k6's traffic would be specific to
+  this server.
