@@ -561,3 +561,42 @@ Box, the PR tree with its default window, same protocol (`w2b-pr`), next to the 
   with the shim rebuilt.
 - Not done: `TD_PROFILE` and the stats code stay (they sit in the main loop, and touching it
   needs the six-run check); the LuaJIT pin is still the sha256 of a GitHub-generated archive.
+
+### 27. Three settings tried at 265k: checkpoint trigger 16,384, answer cap 256 and 8,192
+
+Box, PR tree, organiser's protocol, stats on, one run each, through `bench/exp.sh`. Baseline is
+the two 2 ms runs of sections 25 and 26.
+
+| 265k users | baseline (2 runs) | `TD_CKPT_FRAMES=16384` | `TD_ANSWER_CAP=256` | `TD_ANSWER_CAP=8192` |
+|---|---:|---:|---:|---:|
+| p95 | 470–646 ms | 2.09 s | 567 ms | 828 ms |
+| p99 | 1.87–2.35 s | 6.37 s | 1.40 s | 1.85 s |
+| µs/req | 23.1–23.5 | 26.31 | 23.22 | about 24.1 |
+| WAL peak (frames) | 23k–37k | 133,745 | 23,250 | 19,509 |
+| Checkpoint rounds | 502–503 | 138 | 649 | 658 |
+| Holds / unfinished | 285–289 / 73–84 | 93 / 48 | 404 / 168 | 411 / 174 |
+| Longest hold | 1.5–1.6 s | 2.8 s | 1.1 s | 1.9 s |
+| Deferred requests | 1.5–2.0 M | 3.6 M | 5.1 M | 1.7 M |
+| Seconds with deferrals | 132–133 | 189 | 362 | 128 |
+
+- **Trigger 16,384: worse on everything.** A quarter of the rounds, but half the holds end
+  unfinished and the log reaches 133,745 frames, twice the level where writes should stay held:
+  a first round that starts with 16k frames takes so long that the log is far past the limit
+  when the hold begins. The trigger does bound the log. 4,096 stays; a smaller trigger is the
+  direction to try.
+- **Cap 256: shorter tail, slower middle.** p99 1.40 s and the longest request 4.4 s are the best
+  so far, but the loop is in the deferred state for the whole run and p95 during the hold is
+  180–800 ms against 70–160 ms. CPU per request and user time are unchanged, so going through
+  the stash does not cost measurable user time.
+- **Cap 8,192: no gain.** About the same deferrals as the baseline, latency in the baseline's
+  range or worse.
+- Defaults unchanged (trigger 4,096, cap 2,048).
+
+**Out-of-memory kill at the end of the 8,192 run.** The load finished with no failed requests;
+three seconds after the generator closed all 265k connections at once the kernel killed the
+server (anon RSS 283 MB). The harness then had no cgroup to read, so that run's µs/req is worked
+out from the service's CPU total. The same kill at teardown happened to earlier builds
+(section 17). k6 ramps down over 30 s instead of closing everything at once, so this is harsher
+than the real test, but the server has too little memory headroom and this is the next thing to
+fix: find what the 283 MB is (output-buffer pool, six rings' buffers, stash buffers, the 64 MB
+page cache, allocator fragmentation) and cap it.
