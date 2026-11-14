@@ -36,6 +36,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -158,6 +159,7 @@ type user struct {
 	rng     *rand.Rand
 	body    []byte
 	iter    int
+	anyPort bool // dial from a kernel-chosen port (set after a failed dial)
 	gzipped bool // the last response body is gzip-compressed
 
 	connecting time.Duration // time spent dialing during the current request
@@ -229,7 +231,30 @@ func (u *user) roundTrip(method, path string, auth bool, payload []byte) (int, e
 	if u.c == nil {
 		d := net.Dialer{Timeout: *timeout}
 		if len(srcIPs) > 0 {
-			d.LocalAddr = &net.TCPAddr{IP: srcIPs[u.n%len(srcIPs)]}
+			// Every user gets its own source address and port. Left to the kernel, connect() looks
+			// for a free port among the even ones first and scans them all once they are used up
+			// (about 32k per address), and bind() to port 0 searches under a lock: past ~190k
+			// users on six addresses the generator spent all its CPU in the kernel. Binding to a
+			// given port needs no search. SO_REUSEADDR lets a user take its port again after a
+			// reconnect.
+			port := 0
+			if !u.anyPort {
+				port = 1024 + (u.n/len(srcIPs))%64000
+			}
+			d.LocalAddr = &net.TCPAddr{IP: srcIPs[u.n%len(srcIPs)], Port: port}
+			d.Control = func(network, address string, c syscall.RawConn) error {
+				var e error
+				if err := c.Control(func(fd uintptr) {
+					if port != 0 {
+						e = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+					} else {
+						e = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, 24 /* IP_BIND_ADDRESS_NO_PORT */, 1)
+					}
+				}); err != nil {
+					return err
+				}
+				return e
+			}
 		}
 		tc := time.Now()
 		c, err := d.Dial("tcp", net.JoinHostPort(u.host, u.port))
@@ -238,6 +263,7 @@ func (u *user) roundTrip(method, path string, auth bool, payload []byte) (int, e
 		connHist[bucket(ct)].Add(1)
 		dials.Add(1)
 		if err != nil {
+			u.anyPort = true // the given port may still be closing: let the kernel choose next time
 			return 0, err
 		}
 		u.c = c

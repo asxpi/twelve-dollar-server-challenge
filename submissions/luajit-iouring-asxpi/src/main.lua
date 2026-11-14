@@ -40,7 +40,9 @@ local CACHE_KB = env("TD_CACHE_KB", 65536)
 local AUTOCKPT = env("TD_AUTOCKPT", 1000)
 local BACKLOG = env("TD_BACKLOG", 4096)
 local CKPT_FRAMES = env("TD_CKPT_FRAMES", 4096)   -- WAL frames (4 KB each) that start a checkpoint
-local HOLD_MS = env("TD_HOLD_MS", 250)            -- longest time writes wait for a checkpoint to finish
+local HOLD_MS = env("TD_HOLD_MS", 250)            -- how long writes wait for a checkpoint to finish, at first
+local HOLD_MAX_MS = env("TD_HOLD_MAX_MS", 2000)   -- ... and at most, after holds that were too short
+local CKPT_FORCE = env("TD_CKPT_FORCE", 65536)    -- WAL frames past which writes are held until the log restarts
 local MARGIN = env("TD_MARGIN", 5000)             -- free slots at which a ring stops accepting
 
 local function die(msg)
@@ -77,7 +79,7 @@ local QMASK = 65535                               -- queues hold a connection at
 local st = {
   accepts = 0, closes = 0, reqs = 0, passes = 0, cqes = 0, enobufs = 0, sends = 0, short_sends = 0,
   stash = 0, commits = 0, commit_max = 0, commit_sum = 0, pass_max = 0, busy = 0, flushes = 0,
-  enter = 0, errors = 0, max_batch = 0, held = 0, holds = 0, hold_max = 0, ckpts = 0, enter_max = 0, reap_max = 0, flush_max = 0, deferred = 0, rearms = 0,
+  enter = 0, errors = 0, max_batch = 0, held = 0, holds = 0, hold_max = 0, ckpts = 0, enter_max = 0, reap_max = 0, flush_max = 0, deferred = 0, rearms = 0, hold_fail = 0,
 }
 
 local ts = ffi.new("td_timespec")
@@ -722,6 +724,7 @@ local function main()
   local idle = false
   local ck_phase, ck_mark, hold_start = 0, 0, 0
   local ck_boost = false
+  local hold_ms = HOLD_MS
   local cpu_prev = 0
   while true do
     -- Ring 1 waits for BATCH completions or WAIT_US, whichever comes first, so a pass answers a
@@ -792,12 +795,14 @@ local function main()
     -- copy the frames written while it runs, and the log only restarts once it is fully copied.
     -- So after the first round, writes are held (reads go on) while a short second round copies
     -- the rest; the next write then restarts the log.
+    --
+    -- When the loop is busy the thread gets no CPU at idle priority and the rounds do not finish.
+    -- Giving up on the hold at a fixed limit then lets the log grow, the next round has more to
+    -- copy than the last, and it never catches up (a 280k run reached 258k frames, commits took
+    -- 300 ms, and the server ran out of memory). So: the thread has normal priority while a
+    -- round runs, a hold that was too short makes the next one longer, and past CKPT_FORCE
+    -- frames writes stay held until the log has been copied.
     local wf = shim.td_wal_frames()
-    if not ck_boost and wf >= CKPT_BOOST then
-      ck_boost = true; shim.td_ckpt_boost(1)
-    elseif ck_boost and wf < CKPT_FRAMES then
-      ck_boost = false; shim.td_ckpt_boost(0)
-    end
     if ck_phase == 0 then
       if wf >= CKPT_FRAMES and shim.td_ckpt_start() == 1 then ck_phase = 1 end
     elseif ck_phase == 3 then
@@ -806,16 +811,19 @@ local function main()
     else
       local done = shim.td_ckpt_running() == 0
       local end_hold = false
-      if ck_phase == 2 and (t0 - hold_start) * 1000 > HOLD_MS then
-        end_hold = true; ck_phase = 1          -- too slow: let writes go on, try again later
+      if ck_phase == 2 and wf < CKPT_FORCE and (t0 - hold_start) * 1000 > hold_ms then
+        end_hold = true; ck_phase = 1          -- too slow: let writes go on, and hold longer next time
+        hold_ms = math.min(hold_ms * 2, HOLD_MAX_MS)
+        st.hold_fail = st.hold_fail + 1
       end
       if done then
         st.ckpts = st.ckpts + 1
         -- complete only if nothing was written since the round took its snapshot of the log
         if shim.td_wal_frames() <= shim.td_ckpt_done() then
-          if ck_phase == 2 then end_hold = true end
+          if ck_phase == 2 then end_hold = true; hold_ms = HOLD_MS end
           ck_phase = 3; ck_mark = shim.td_wal_frames()
-        elseif ck_phase == 1 and not end_hold then
+        elseif (ck_phase == 1 and not end_hold) or (ck_phase == 1 and wf >= CKPT_FORCE) then
+          end_hold = false
           app.hold = true; hold_start = t0; ck_phase = 2
           st.holds = st.holds + 1
           shim.td_ckpt_start()
@@ -831,6 +839,13 @@ local function main()
         if d > st.hold_max then st.hold_max = d end
         for i = 1, nrings do release_held(rings[i]) end
       end
+    end
+    -- Normal priority while a round runs or the log is long, idle priority otherwise. A round is
+    -- some tens of milliseconds of CPU every second or two; at idle priority it gets none of it
+    -- from a busy loop, and the work only piles up.
+    local want = ck_phase == 1 or ck_phase == 2 or wf >= CKPT_BOOST
+    if want ~= ck_boost then
+      ck_boost = want; shim.td_ckpt_boost(want and 1 or 0)
     end
 
     st.passes = st.passes + 1
@@ -849,12 +864,12 @@ local function main()
         io.stderr:write(string.format(
           "conns=%d rings=%d req/s=%d (feed %d post %d like %d create %d other %d) passes=%d cqe=%d maxbatch=%d "
           .. "cpu=%.0f%% us/req=%.1f busy=%.0f%% pass_max=%.1fms enter_max=%.1fms reap_max=%.1fms flush_max=%.1fms commits=%d commit_avg=%.0fus commit_max=%.1fms wal=%d "
-          .. "ckpt=%d holds=%d held=%d hold_max=%.0fms enobufs=%d rearm=%d deferred=%d stash=%d short=%d sqflush=%d acc=%d close=%d err=%d lua_kb=%.0f\n",
+          .. "ckpt=%d holds=%d held=%d hold_max=%.0fms hold_fail=%d enobufs=%d rearm=%d deferred=%d stash=%d short=%d sqflush=%d acc=%d close=%d err=%d lua_kb=%.0f\n",
           conns, nrings, st.reqs, app.n_feed, app.n_post, app.n_like, app.n_create, app.n_other,
           st.passes, st.cqes, st.max_batch, (cputime() - cpu_prev) / (t1 - last_stats) * 100,
           st.reqs > 0 and (cputime() - cpu_prev) / st.reqs * 1e6 or 0, st.busy / (t1 - last_stats) * 100, st.pass_max * 1000, st.enter_max * 1000, st.reap_max * 1000, st.flush_max * 1000,
           st.commits, st.commits > 0 and st.commit_sum / st.commits * 1e6 or 0, st.commit_max * 1000,
-          shim.td_wal_frames(), st.ckpts, st.holds, st.held, st.hold_max * 1000, st.enobufs, st.rearms, st.deferred, st.stash, st.short_sends, st.flushes, st.accepts, st.closes,
+          shim.td_wal_frames(), st.ckpts, st.holds, st.held, st.hold_max * 1000, st.hold_fail, st.enobufs, st.rearms, st.deferred, st.stash, st.short_sends, st.flushes, st.accepts, st.closes,
           st.errors, collectgarbage("count")))
         for k in pairs(st) do st[k] = 0 end
         app.n_feed, app.n_post, app.n_like, app.n_create, app.n_other = 0, 0, 0, 0, 0
