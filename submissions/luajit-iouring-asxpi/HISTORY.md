@@ -323,3 +323,9 @@ HS256 verification was 3% of CPU: about 5 µs per token on the laptop, 8 µs on 
   traces, no "register coalescing" aborts, 25–54 aborts per run. The six runs before the change
   were 22.6–23.3 (mean 22.9): the gain for the whole server is inside the noise here, as expected
   for something that is 3% of CPU and only on writes.
+
+### 16. Users cursors with the new SHA-256 (this branch)
+
+Section 15 merged into this branch. Tests 42/42. Stability series, laptop, eight runs with
+`-jv`: 20.9–21.6 µs/req, no blacklisted traces, no "register coalescing" aborts. The plain
+branch measured 22.4–23.4 in its own series, so the users cursors are still worth about 6% here.
