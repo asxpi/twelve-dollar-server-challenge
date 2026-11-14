@@ -304,3 +304,60 @@ HS256 verification was 3% of CPU: about 5 µs per token on the laptop, 8 µs on 
   traces, no "register coalescing" aborts, 25–54 aborts per run. The six runs before the change
   were 22.6–23.3 (mean 22.9): the gain for the whole server is inside the noise here, as expected
   for something that is 3% of CPU and only on writes.
+
+### 16. The load generator's own limit: source ports (fixed)
+
+Every run from the new generator stalled just past 190–200k users, with 8 vCPUs and with 16,
+while the generator spent 98% of its CPU in the kernel (load average 30–70).
+
+- Cause: with `-src`, each connection was bound to a source address and the kernel chose the
+  port. `bind()` to port 0 searches the port range under a lock; choosing at `connect()` time
+  instead (`IP_BIND_ADDRESS_NO_PORT`, tried first) did not help either, because `connect()`
+  tries the even ports first and scans all of them once they are used up: about 32k per
+  address, and 280k users over six addresses need 47k each.
+- Fix in `bench/mload`: every user binds its own source address and port (1024 upward, with
+  `SO_REUSEADDR`); after a failed dial it falls back to a kernel-chosen port.
+- After the fix, at 280k users: generator 87% idle, kernel time 4%, load average 3, users
+  ramping exactly on schedule.
+- Runs `q280-*` never started (a quoting mistake in the queue: zsh does not split `$var`), and
+  `f280-v5` was taken with the first, ineffective fix. Sections 12's latency figures and these
+  runs say nothing about the servers.
+
+### 17. First valid 280k runs: Rust holds with spikes, Lua v5 runs out of memory
+
+Box, organiser's protocol unless noted (60 s ramp, 5-minute hold), healthy generator.
+
+| Run | Outcome | req/s | p95 / p99 | µs/req (user / sys) |
+|---|---|---:|---|---|
+| `g280-v5` (120 s ramp, 180 s hold) | collapsed to 15k req/s, OOM-killed at the end | 19,691 | 10.0 s / 59.7 s | about 28 |
+| `h280-rust` | held, no failures, periodic spikes | 26,905 | 943 ms / 4.15 s | 23.69 (7.14 / 16.55) |
+| `k280-v5` (stats on) | OOM-killed after 5 min 25 s | – | – | – |
+
+- Rust at 280k: most 5-second samples at p95 22–34 ms, with spikes to seconds around 100, 140,
+  220 and 320–340 s. By the organiser's thresholds this is a fail on this rig.
+- `mload` sends about 0.105 requests per user per second; the leaderboard's k6 figures work out
+  to about 0.095. So 280k users here is roughly the request rate of 310k there (inferred from
+  the two sets of numbers). Compare by requests per second.
+- Why Lua died (`bench/box-logs/k280-v5.server-stats.log`, `k280-v5.monitor.log`): the WAL
+  stopped restarting. It went from 19,824 frames to 258,652 (about 1 GB) in under two minutes;
+  commits took 90–340 ms; the loop made 5–14 passes a second and fell behind; available memory
+  fell from 610 MB to 354 MB; clients timed out and reconnected (336k sockets); OOM.
+- Cause: the checkpoint thread runs at idle priority, and with the core 85% busy it gets no
+  CPU. The hold on writes gives up after 250 ms, the log is not reset, and every later round
+  has more to copy than the one before. The Rust entry has a last resort here (the loop
+  checkpoints by itself past 65,536 frames), which this server had replaced by a priority
+  boost at 16,384 frames.
+
+### 18. Checkpoints that keep up under load (kept, not yet run on the box)
+
+- The checkpoint thread has normal priority while a round runs (and while the log is long),
+  idle priority otherwise.
+- A hold that ends without the log being copied doubles the next hold's limit (250 ms up to
+  2 s); a successful one resets it.
+- Past 65,536 frames (`TD_CKPT_FORCE`) writes stay held until the log has been copied. Reads
+  go on.
+- New counter in the stats line: `hold_fail`.
+- Tests 42/42. Laptop, saturating load: unchanged behaviour when healthy (log never above
+  5,000 frames, holds of 240–260 ms). With a busy loop stealing the server's core, the old code
+  let the log grow without bound (117,726 frames after 60 s and rising); the new code peaked
+  at 39,712 and reset it, at the price of holds up to 2.9 s (p99 0.9 s in that test).

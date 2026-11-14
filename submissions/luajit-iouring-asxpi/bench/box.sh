@@ -14,7 +14,7 @@ B=$S; S=$S/results; mkdir -p "$S"
 label=$1; sub=$2; U=$3; RAMP=$4; HOLD=$5
 SSH="ssh -o BatchMode=yes -o ConnectTimeout=10"
 snap='cat /sys/fs/cgroup/system.slice/tds.service/cpu.stat | head -3 | tr "\n" " "; head -1 /proc/stat; cat /sys/fs/cgroup/system.slice/tds.service/memory.peak'
-$SSH $T 'systemctl stop tds; for i in $(seq 90); do set -- $(sed -n 2p /proc/net/sockstat); [ "$3" -lt 200 ] && [ "$5" -lt 50 ] && [ "${11}" -lt 500 ] && break; sleep 4; done; sed -n 2p /proc/net/sockstat' > $S/$label.pre.log 2>&1
+$SSH $T 'systemctl stop tds; for i in $(seq 90); do set -- $(sed -n 2p /proc/net/sockstat); [ "$(($3-$5))" -lt 200 ] && [ "$5" -lt 5000 ] && [ "${11}" -lt 3000 ] && break; sleep 4; done; sed -n 2p /proc/net/sockstat' > $S/$label.pre.log 2>&1
 for lg in "${LGS[@]}"; do $SSH root@$lg 'pkill -x mload; rm -f /root/cmp.json; for i in $(seq 60); do set -- $(sed -n 2p /proc/net/sockstat); [ "$3" -lt 200 ] && [ "$5" -lt 50 ] && break; sleep 4; done' ; done
 $SSH $T "[ -f /etc/tds.env.orig ] || cp /etc/tds.env /etc/tds.env.orig; sed -i -e 's/^SUB=.*/SUB=$sub/' -e '/^TD_/d' /etc/tds.env; for kv in ${EXTRA:-}; do echo \$kv >> /etc/tds.env; done; systemctl restart tds; for i in \$(seq 60); do curl -fs http://127.0.0.1/health >/dev/null && break; sleep 0.5; done; curl -s http://127.0.0.1/health; echo" > $S/$label.box.log 2>&1
 grep -q '"status":"ok"' $S/$label.box.log || { echo "$label: server did not come up"; cat $S/$label.box.log; exit 1; }
