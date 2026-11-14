@@ -26,6 +26,7 @@ local JWT_SECRET = tostring(env("JWT_SECRET", "twelve-dollar-challenge"))
 -- tuning knobs (all optional)
 local STATS = env("TD_STATS", 0) ~= 0             -- one line of counters per second on stderr
 local MAX_RINGS = env("TD_MAX_RINGS", 16)
+local PRE_RINGS = env("TD_RINGS", 6)              -- rings made at startup (60,535 connections each)
 local SQ_ENTRIES = env("TD_SQ_ENTRIES", 4096)
 local CQ_ENTRIES = env("TD_CQ_ENTRIES", 32768)
 local NBUF = env("TD_NBUF", 4096)                 -- provided receive buffers per ring (power of 2)
@@ -699,6 +700,13 @@ local function main()
   local r0, e = ring_new()
   if not r0 then die(e) end
   arm_accept(r0)
+  -- Making a ring takes about 0.2 s (a 65,535-entry descriptor table, queues, buffers). Done in
+  -- the middle of a ramp that stalls the loop and starts a backlog, so the rings a full run
+  -- needs are made now. More are still added on demand.
+  for _ = 2, math.min(PRE_RINGS, MAX_RINGS) do
+    local r, e = ring_new()
+    if not r then io.stderr:write("cannot add a ring: ", e, "\n"); break end
+  end
   io.stderr:write(string.format("listening on %s:%d, %d slots per ring, stats %s\n",
     tostring(HOST), PORT, table_size, STATS and "on" or "off"))
 
@@ -743,7 +751,7 @@ local function main()
       local d = mono() - t0
       if d > st.reap_max then st.reap_max = d end
     end
-    idle = (n == 0 and nrings == 1 and r1.sqtail == r1.sqsub)
+    idle = (n == 0 and r1.sqtail == r1.sqsub)
 
     local failed = false
     if app.in_txn then
@@ -767,7 +775,13 @@ local function main()
       if r.nsend > 0 then flush_sends(r, failed) end
       if r.rq_head < r.rq_tail then drain_rearm(r) end
       -- ring 1 submits at the top of the loop; the others submit their sends and collect now
-      if i > 1 then ring_enter(r, 0, 0) end
+      if i > 1 then
+        -- a ring with no connections, no accepts armed and nothing queued needs no system call
+        if r.nconn > 0 or r.accepting or r.acc_n > 0 or r.sqtail ~= r.sqsub then
+          ring_enter(r, 0, 0)
+          idle = false
+        end
+      end
     end
     if STATS then
       local d = mono() - tf

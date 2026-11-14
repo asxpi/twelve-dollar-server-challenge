@@ -38,6 +38,25 @@ Profile after `escape` and the window (laptop, share of total CPU): `io_uring_en
 seek in `post_emit` 9%, COMMIT 7%, `get_feed` 6%, `post_object` 4%, `escape` 3%, `uint` 3%,
 like insert 3%, post insert 3%, SHA-256 3%.
 
+- [x] v3 (2026-11-14, tests 42/42, 9,000 connections over three rings checked locally):
+  six rings are made at startup (`TD_RINGS`), rings with no connections cost no system call,
+  and the loop takes its long idle sleep again when only ring 1 is in use.
+
+## Before the next run
+
+Decided by the 280k probes (HISTORY.md sections 7 and 8) and the Rust calibration at 280k:
+
+- [x] Rings made at startup instead of mid-ramp (v3).
+- [ ] Read the Rust calibration: if Rust also fails 280k on this rig, the rig is harsher than
+      the real benchmark and scores have to be compared at equal load, not against 310k.
+- [ ] Deploy v3 and probe 240k and 260k (180 s ramp, 5-minute hold) to find where it holds.
+- [ ] Load generator closer to the box. The organiser's are in the same datacenter (0.25 ms);
+      ours are 17 ms away over the internet. Another entry (`cider-iouring-pomilon-v4`) used one
+      4 vCPU load generator at the same provider with five source addresses and reports clean
+      holds at 280k–290k. This may also end the connection timeouts between runs.
+- [ ] Decide on the users-cursor idea (section 3): the largest user-space item left, but a
+      rule 5 question.
+
 ## To try, in order
 
 ### 1. Confirm on the box
@@ -61,26 +80,28 @@ Re-run after a 10-minute pause, same load, no failed requests (3.90M requests):
 - [x] `escape` + 4 ms window, clean: 25.21 µs/req, level with Rust (25.33) and 15% below the
       current build (29.50). User time is still 1.7 µs above Rust; kernel time is 1.9 µs below.
       Passed: p95 53 ms, p99 216 ms.
-- [ ] **Collapse to explain first.** The `escape`-only run with the 1 ms window went wrong:
+- [x] **Collapse explained** (HISTORY.md section 8): once the loop falls behind, every pass
+      answers exactly `ANSWER_CAP` requests from the ready queue and defers all new ones; if that
+      rate is below the arrival rate it never recovers. Original note: the `escape`-only run with the 1 ms window went wrong:
       CPU per request doubled (52 µs), the box was 75% busy at only 13k req/s, p95 4.7 s and
       p99 10 s, with just 0.14% failed requests. This is what a failed probe looks like. Not
       reproduced, cause unknown. Suspect: a backlog puts connections on the ready/re-arm queues,
       the loop then stops waiting (`wait = 0`) and runs many near-empty passes, each paying the
       fixed per-pass cost. Reproduce with `TD_STATS=1` and look at passes/s, deferred, rearm.
 - [ ] `escape` alone at 200k, clean (still missing because of the collapse above).
-- [ ] Make the window the default in `main.lua` once 2 ms and 8 ms have been compared.
-- [ ] If the window helps, try 2000 / 8000 and pick by µs/req; latency budget is p95 500 ms.
+- [x] 4 ms / 4096 is the default in `main.lua` (v2).
+- [ ] Compare 2 ms and 8 ms by µs/req; latency budget is p95 500 ms.
 
 ### 2. Per-pass overhead
 
 - [ ] Measure one pass with nothing to do: BEGIN/COMMIT, opening four cursors, one
       `io_uring_enter` per ring, clock calls. Skip the transaction when a pass has no requests.
-- [ ] Idle spin: with more than one ring the loop never takes the long sleep (980 passes/s at
+- [x] (v3) Idle spin: with more than one ring the loop never takes the long sleep (980 passes/s at
       0 req/s on the box, 1–2% CPU). Let extra rings be idle too.
 
 ### 3. Lua layer (remaining user-space gap)
 
-- [ ] `get_feed`: three FFI calls per row (`td_prev` + two `td_rowid`). One shim call that
+- [x] (v2, partly) `get_feed`: `td_rowid` is now called once per row. Still open: one shim call that
       returns rowid and payload.
 - [ ] Users seek in `post_emit` (now the largest user-space item, 9% + 2% from single posts):
       20 root-to-leaf descents per feed. Idea: one users cursor per feed position. Within a pass
@@ -105,7 +126,7 @@ Re-run after a 10-minute pause, same load, no failed requests (3.90M requests):
 
 ### 5. SQLite
 
-- [ ] Add the flags Rust builds with: `OMIT_AUTOINIT`, `OMIT_UTF16`, `OMIT_TRACE`,
+- [x] (v2) Add the flags Rust builds with: `OMIT_AUTOINIT`, `OMIT_UTF16`, `OMIT_TRACE`,
       `OMIT_COMPLETE`, `OMIT_GET_TABLE`, `OMIT_TCL_VARIABLE` (expected small).
 - [ ] Custom VFS that writes a commit's WAL frames in one write (allowed by the 2026-10-31
       ruling; several entries do it). Stock SQLite does two `pwrite`s per frame.
@@ -118,7 +139,11 @@ Re-run after a 10-minute pause, same load, no failed requests (3.90M requests):
 Top entries fail on p99 at 80–97% CPU with zero errors, not on average CPU.
 
 - [ ] LIFO for the ready queue while a backlog exists (FIFO makes everyone late).
-- [ ] Find the limit on the box: probes at 240k / 260k / 280k once the build is settled.
+- [x] 280k probed twice: failed both times (HISTORY.md sections 7 and 8).
+- [ ] Probes at 240k and 260k.
+- [ ] Backlog regime: a deferred request is copied into a buffer that is allocated and freed
+      each time. Take those buffers from a pool, and look at whether fresh requests can be
+      answered directly while the ready queue is being drained.
 
 ### 7. Bugs found on the way (not score-relevant)
 

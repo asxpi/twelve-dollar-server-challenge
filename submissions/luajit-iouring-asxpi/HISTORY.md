@@ -170,3 +170,16 @@ Findings:
 
 Not known yet: whether this box can carry 280k at all. The Rust entry is being run at 280k on
 the same rig as calibration.
+
+### 9. v3: rings made at startup (kept, not yet measured on the box)
+
+Section 8 showed a 0.2 s stall when the fifth ring was created mid-ramp. Each ring holds 60,535
+connections (65,535 slots minus a 5,000 margin), so 310k users need six.
+
+- `TD_RINGS` (default 6) rings are made at startup; more are still added on demand.
+- A ring with no connections, no accept armed and nothing queued is not entered, so the extra
+  rings cost no system call per pass.
+- The long idle sleep now applies whenever only ring 1 is in use (before, never with more than
+  one ring: 980 passes/s at zero load on the box).
+- Tests 42/42. Local check with a 4,096-descriptor limit: 9,000 connections spread over three
+  rings, 9,000 correct responses in each of two rounds, all closed afterwards.
