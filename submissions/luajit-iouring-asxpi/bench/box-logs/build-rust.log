@@ -1,0 +1,38 @@
+vendor/sqlite-amalgamation-3540100.zip: OK
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded crypto-common v0.1.7
+  Downloaded block-buffer v0.10.4
+  Downloaded cpufeatures v0.2.17
+  Downloaded find-msvc-tools v0.1.15
+  Downloaded generic-array v0.14.7
+  Downloaded version_check v0.9.5
+  Downloaded shlex v1.3.0
+  Downloaded sha2 v0.10.9
+  Downloaded cc v1.2.56
+  Downloaded typenum v1.20.1
+  Downloaded memchr v2.8.0
+  Downloaded io-uring v0.7.15
+  Downloaded digest v0.10.7
+  Downloaded bitflags v2.13.2
+  Downloaded cfg-if v1.0.5
+  Downloaded libc v0.2.183
+   Compiling version_check v0.9.5
+   Compiling generic-array v0.14.7
+   Compiling typenum v1.20.1
+   Compiling find-msvc-tools v0.1.15
+   Compiling libc v0.2.183
+   Compiling shlex v1.3.0
+   Compiling cc v1.2.56
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling cfg-if v1.0.5
+   Compiling io-uring v0.7.15
+   Compiling digest v0.10.7
+   Compiling feed-server v0.1.0 (/home/deploy/tds/submissions/rust-iouring-kensac)
+   Compiling bitflags v2.13.2
+   Compiling cpufeatures v0.2.17
+   Compiling sha2 v0.10.9
+   Compiling memchr v2.8.0
+    Finished `release` profile [optimized] target(s) in 2m 01s
+done-0

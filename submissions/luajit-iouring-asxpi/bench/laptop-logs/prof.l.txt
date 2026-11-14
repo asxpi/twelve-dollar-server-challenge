@@ -1,0 +1,27 @@
+47%  main.lua:ring_enter < main.lua:main < main.lua:0
+  -- 100%  main.lua:261
+12%  json.lua:escape < app.lua:post_emit < app.lua:get_feed
+  -- 61%  json.lua:268
+  -- 37%  json.lua:266
+ 8%  app.lua:post_emit < app.lua:get_feed < app.lua:handle
+  -- 97%  app.lua:190
+ 5%  app.lua:get_feed < app.lua:handle < main.lua:process
+  -- 20%  app.lua:337
+  -- 14%  app.lua:310
+  -- 12%  app.lua:345
+  -- 12%  app.lua:325
+  -- 10%  app.lua:333
+  -- 10%  app.lua:300
+  --  8%  app.lua:343
+  --  6%  app.lua:286
+  --  4%  app.lua:288
+ 4%  main.lua:main < main.lua:0 < @0x5b7de68cf500
+  -- 95%  main.lua:751
+ 4%  app.lua:like_post < app.lua:handle < main.lua:process
+  -- 93%  app.lua:374
+  --  8%  app.lua:372
+ 3%  app.lua:post_object < app.lua:get_post < app.lua:handle
+  -- 53%  app.lua:190
+  -- 24%  app.lua:205
+  -- 21%  app.lua:216
+  --  3%  app.lua:174
