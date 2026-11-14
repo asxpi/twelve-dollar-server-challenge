@@ -524,3 +524,23 @@ Box, the source-only PR tree (this branch), organiser's protocol, stats on.
   where the checkpoint was not under pressure.
 - No failed requests in any of the three. None passes the organiser's thresholds on this rig.
 - Tests 42/42 locally and through `test/run.sh` on the box with the final tree.
+
+### 26. The 2 ms run repeated: not a fluke
+
+Box, the PR tree with its default window, same protocol (`w2b-pr`), next to the first run.
+
+| 265k users, 2 ms | first (`w2-pr`) | repeat (`w2b-pr`) |
+|---|---:|---:|
+| Requests/s | 25,658 | 25,704 |
+| p95 / p99 | 646 ms / 2.35 s | 470 ms / 1.87 s |
+| µs/req (user / sys) | 23.51 (6.00 / 17.51) | 23.13 (6.01 / 17.13) |
+| Box busy | 75% | 75% |
+| WAL peak (frames) | 23,156 | 36,509 |
+| Holds ended unfinished | 73 | 84 |
+| Peak RAM | 1,519 MB | 1,181 MB |
+
+- CPU per request, user time and box load repeat almost exactly. Latency repeats in kind: the
+  second run's p95 is under the organiser's 500 ms; p99 is still over 1 s because of the ramp
+  (2.4 s at 60 s) and one spike at 340 s. From 100 s to 300 s every sample shown had p95 between
+  70 and 160 ms.
+- Both 2 ms runs are better than the 4 ms, 8 ms and Rust runs at this load on every figure.
