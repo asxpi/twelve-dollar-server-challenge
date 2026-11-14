@@ -323,30 +323,21 @@ local function get_feed()
   end
   if r < 0 then return fixed(R_INTERNAL) end
 
-  -- the rows, newest first
-  r = shim.td_row(C_POSTS, hi, rec, REC_CAP)
-  if r <= 0 then
-    if r < 0 then return fixed(R_INTERNAL) end
-    return get_feed_slow()
-  end
+  -- the rows, newest first. Every feed post has a posts cursor and a users cursor of its own
+  -- (its id modulo 20; see td_user_row in shim.c), which usually still sit on its rows from the
+  -- feed request before. Two posts that share a slot just move the cursors back and forth.
   local o = begin_resp(H_200)
   o = lit(o, '{"posts":[')
   for k = 0, n - 1 do
     local id = feed_ids[k]
-    if k > 0 then
-      resp[o] = 44; o = o + 1
-      local rid
-      repeat
-        r = shim.td_prev(C_POSTS, rec, REC_CAP)
-        if r <= 0 then
-          if r < 0 then return fixed(R_INTERNAL) end
-          return get_feed_slow()
-        end
-        rid = tonumber(shim.td_rowid(C_POSTS))
-      until rid <= id
-      if rid ~= id then return get_feed_slow() end
+    if k > 0 then resp[o] = 44; o = o + 1 end
+    local slot = id % 20
+    r = shim.td_post_row(slot, id, rec, REC_CAP)
+    if r <= 0 then
+      if r < 0 then return fixed(R_INTERNAL) end
+      return get_feed_slow()
     end
-    local e = post_emit(o, id, feed_likes[id - lo], id % 20)
+    local e = post_emit(o, id, feed_likes[id - lo], slot)
     if not e then
       if e == false then return fixed(R_INTERNAL) end
       return get_feed_slow()

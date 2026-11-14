@@ -86,6 +86,7 @@ int td_insert_post(int64_t user_id, const uint8_t *body, int n, int64_t *id, uin
 int td_insert_like(int64_t user_id, int64_t post_id);
 int td_health(void);
 int td_user_row(int k, int64_t rowid, uint8_t *buf, uint32_t cap);
+int td_post_row(int k, int64_t rowid, uint8_t *buf, uint32_t cap);
 int td_json_clean(const uint8_t *, int);
 int td_wal_frames(void);
 int td_ckpt_start(void);

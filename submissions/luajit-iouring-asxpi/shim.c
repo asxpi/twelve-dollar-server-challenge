@@ -17,6 +17,8 @@
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <sched.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 enum { C_POSTS, C_USERS, C_FEED, C_LIKES, NCUR };
 
@@ -28,6 +30,7 @@ static BtCursor *cur[NCUR];
 /* One more users cursor per feed slot (see td_user_row). */
 #define NUCUR 20
 static BtCursor *ucur[NUCUR];
+static BtCursor *pcur[NUCUR];    /* and one posts cursor (see td_post_row) */
 static int in_txn;
 static UnpackedRecord *likes_key;
 static sqlite3_stmt *st_begin, *st_commit, *st_rollback, *st_post, *st_like, *st_health;
@@ -72,6 +75,153 @@ static int wal_hook(void *arg, sqlite3 *d, const char *name, int nframe) {
   return SQLITE_OK;
 }
 
+/* ---- one write per commit: a VFS over "unix-excl" that changes only the WAL file's writes ----
+ *
+ * SQLite writes a transaction's frames one after another, each as two writes (a 24-byte header,
+ * then the page): fifteen or more pwrite calls per commit here. While td_commit runs COMMIT,
+ * writes to the WAL that continue where the last one ended are collected in a buffer, and the
+ * buffer goes to the file when the commit frame's page arrives (the frame header's database-size
+ * field is non-zero only for that frame). That is still inside SQLite's own write call, so the
+ * commit is in the kernel before SQLite publishes it in the WAL index and before COMMIT returns.
+ * Any other write, and every read, size query, sync, truncate and close, writes the buffer out
+ * first. Everything else, and the database file, is unix-excl's. This is SQLite's public VFS
+ * interface, the pattern of its own vfstrace and multiplex shims. TD_WALBUF=0 turns it off. */
+typedef struct TdFile {
+  sqlite3_file base;
+  int is_wal;
+  int commit_frame;            /* the frame header just buffered is a commit frame's */
+  unsigned char *buf;
+  int n, cap;
+  sqlite3_int64 off;           /* file offset of buf[0] */
+} TdFile;
+#define TD_REAL(p) ((sqlite3_file *)((p) + 1))
+static sqlite3_vfs *td_base;   /* unix-excl */
+static sqlite3_vfs td_vfs;
+static int td_in_commit;
+static TdFile *td_wal;         /* the main connection's WAL */
+
+static int td_flush(TdFile *p) {
+  int rc = SQLITE_OK, done = 0;
+  while (rc == SQLITE_OK && done < p->n) {
+    int amt = p->n - done;
+    if (amt > 65536) amt = 65536;
+    rc = TD_REAL(p)->pMethods->xWrite(TD_REAL(p), p->buf + done, amt, p->off + done);
+    done += amt;
+  }
+  p->n = 0; p->commit_frame = 0;
+  return rc;
+}
+static int tdClose(sqlite3_file *f) {
+  TdFile *p = (TdFile *)f;
+  int rc = p->n ? td_flush(p) : SQLITE_OK;
+  int rc2 = TD_REAL(p)->pMethods->xClose(TD_REAL(p));
+  if (td_wal == p) td_wal = 0;
+  sqlite3_free(p->buf); p->buf = 0;
+  return rc ? rc : rc2;
+}
+static int tdRead(sqlite3_file *f, void *z, int amt, sqlite3_int64 off) {
+  TdFile *p = (TdFile *)f;
+  if (p->n) { int rc = td_flush(p); if (rc) return rc; }
+  return TD_REAL(p)->pMethods->xRead(TD_REAL(p), z, amt, off);
+}
+static int tdWrite(sqlite3_file *f, const void *z, int amt, sqlite3_int64 off) {
+  TdFile *p = (TdFile *)f;
+  if (p->is_wal && td_in_commit && p == td_wal) {
+    if (p->n && off != p->off + p->n) { int rc = td_flush(p); if (rc) return rc; }
+    if (p->n + amt > p->cap) {
+      if (p->n) { int rc = td_flush(p); if (rc) return rc; }
+      if (amt > p->cap) {
+        int cap = 1 << 16;
+        while (cap < amt) cap <<= 1;
+        if (cap > (1 << 20)) return TD_REAL(p)->pMethods->xWrite(TD_REAL(p), z, amt, off);
+        unsigned char *nb = sqlite3_realloc(p->buf, cap);
+        if (!nb) return SQLITE_NOMEM;
+        p->buf = nb; p->cap = cap;
+      }
+    }
+    if (p->n == 0) p->off = off;
+    memcpy(p->buf + p->n, z, amt);
+    p->n += amt;
+    if (amt == 24) {                         /* a frame header: bytes 4..7 are the commit mark */
+      const unsigned char *h = z;
+      p->commit_frame = (h[4] | h[5] | h[6] | h[7]) != 0;
+    } else if (p->commit_frame) {            /* the commit frame's page: the transaction is whole */
+      return td_flush(p);
+    }
+    return SQLITE_OK;
+  }
+  if (p->n) { int rc = td_flush(p); if (rc) return rc; }
+  return TD_REAL(p)->pMethods->xWrite(TD_REAL(p), z, amt, off);
+}
+static int tdTruncate(sqlite3_file *f, sqlite3_int64 sz) {
+  TdFile *p = (TdFile *)f;
+  if (p->n) { int rc = td_flush(p); if (rc) return rc; }
+  return TD_REAL(p)->pMethods->xTruncate(TD_REAL(p), sz);
+}
+static int tdSync(sqlite3_file *f, int flags) {
+  TdFile *p = (TdFile *)f;
+  if (p->n) { int rc = td_flush(p); if (rc) return rc; }
+  return TD_REAL(p)->pMethods->xSync(TD_REAL(p), flags);
+}
+static int tdFileSize(sqlite3_file *f, sqlite3_int64 *sz) {
+  TdFile *p = (TdFile *)f;
+  if (p->n) { int rc = td_flush(p); if (rc) return rc; }
+  return TD_REAL(p)->pMethods->xFileSize(TD_REAL(p), sz);
+}
+static int tdLock(sqlite3_file *f, int l) { return TD_REAL((TdFile *)f)->pMethods->xLock(TD_REAL((TdFile *)f), l); }
+static int tdUnlock(sqlite3_file *f, int l) { return TD_REAL((TdFile *)f)->pMethods->xUnlock(TD_REAL((TdFile *)f), l); }
+static int tdCheckReservedLock(sqlite3_file *f, int *r) { return TD_REAL((TdFile *)f)->pMethods->xCheckReservedLock(TD_REAL((TdFile *)f), r); }
+static int tdFileControl(sqlite3_file *f, int op, void *a) { return TD_REAL((TdFile *)f)->pMethods->xFileControl(TD_REAL((TdFile *)f), op, a); }
+static int tdSectorSize(sqlite3_file *f) { return TD_REAL((TdFile *)f)->pMethods->xSectorSize(TD_REAL((TdFile *)f)); }
+static int tdDeviceCharacteristics(sqlite3_file *f) { return TD_REAL((TdFile *)f)->pMethods->xDeviceCharacteristics(TD_REAL((TdFile *)f)); }
+static int tdShmMap(sqlite3_file *f, int pg, int sz, int ext, void volatile **pp) { return TD_REAL((TdFile *)f)->pMethods->xShmMap(TD_REAL((TdFile *)f), pg, sz, ext, pp); }
+static int tdShmLock(sqlite3_file *f, int off, int n, int flags) { return TD_REAL((TdFile *)f)->pMethods->xShmLock(TD_REAL((TdFile *)f), off, n, flags); }
+static void tdShmBarrier(sqlite3_file *f) { TD_REAL((TdFile *)f)->pMethods->xShmBarrier(TD_REAL((TdFile *)f)); }
+static int tdShmUnmap(sqlite3_file *f, int del) { return TD_REAL((TdFile *)f)->pMethods->xShmUnmap(TD_REAL((TdFile *)f), del); }
+static int tdFetch(sqlite3_file *f, sqlite3_int64 off, int amt, void **pp) { return TD_REAL((TdFile *)f)->pMethods->xFetch(TD_REAL((TdFile *)f), off, amt, pp); }
+static int tdUnfetch(sqlite3_file *f, sqlite3_int64 off, void *pg) { return TD_REAL((TdFile *)f)->pMethods->xUnfetch(TD_REAL((TdFile *)f), off, pg); }
+static const sqlite3_io_methods td_io = {
+  3, tdClose, tdRead, tdWrite, tdTruncate, tdSync, tdFileSize, tdLock, tdUnlock, tdCheckReservedLock,
+  tdFileControl, tdSectorSize, tdDeviceCharacteristics, tdShmMap, tdShmLock, tdShmBarrier, tdShmUnmap,
+  tdFetch, tdUnfetch
+};
+static int tdOpen(sqlite3_vfs *v, sqlite3_filename name, sqlite3_file *f, int flags, int *out) {
+  TdFile *p = (TdFile *)f;
+  (void)v;
+  memset(p, 0, sizeof *p);
+  int rc = td_base->xOpen(td_base, name, TD_REAL(p), flags, out);
+  if (rc == SQLITE_OK && TD_REAL(p)->pMethods) {
+    p->base.pMethods = &td_io;
+    p->is_wal = (flags & SQLITE_OPEN_WAL) != 0;
+    if (p->is_wal && !td_wal) td_wal = p;
+  }
+  return rc;
+}
+static int tdDelete(sqlite3_vfs *v, const char *n, int s) { (void)v; return td_base->xDelete(td_base, n, s); }
+static int tdAccess(sqlite3_vfs *v, const char *n, int fl, int *r) { (void)v; return td_base->xAccess(td_base, n, fl, r); }
+static int tdFullPathname(sqlite3_vfs *v, const char *n, int nOut, char *out) { (void)v; return td_base->xFullPathname(td_base, n, nOut, out); }
+/* registers the VFS; returns its name, or "unix-excl" if it is switched off */
+static const char *td_vfs_name(void) {
+  const char *e = getenv("TD_WALBUF");
+  td_base = sqlite3_vfs_find("unix-excl");
+  if (!td_base || (e && e[0] == '0') || td_base->iVersion < 1) return "unix-excl";
+  td_vfs = *td_base;
+  td_vfs.zName = "td-walbuf";
+  td_vfs.pNext = 0;
+  td_vfs.szOsFile = (int)sizeof(TdFile) + td_base->szOsFile;
+  td_vfs.xOpen = tdOpen;
+  td_vfs.xDelete = tdDelete;
+  td_vfs.xAccess = tdAccess;
+  td_vfs.xFullPathname = tdFullPathname;
+  if (sqlite3_vfs_register(&td_vfs, 0)) return "unix-excl";
+  return td_vfs.zName;
+}
+
+/* our own descriptors of the two files, for syncing and cache advice from the checkpoint thread.
+   Never closed: closing any descriptor of a file drops the process's locks on it. */
+static int own_db_fd = -1, own_wal_fd = -1;
+static char wal_path[1024];
+
 static void *ck_main(void *arg) {
   (void)arg;
   struct sched_param sp = {0};
@@ -84,6 +234,17 @@ static void *ck_main(void *arg) {
     pthread_mutex_unlock(&ck_mu);
     int nlog = -1, ndone = -1;
     sqlite3_wal_checkpoint_v2(ckdb, 0, SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
+    if (nlog >= 0 && ndone < nlog) {
+      /* An incomplete round: SQLite only syncs the database file at the end of a round that
+         copied the whole log, which here is the round that runs while writes are held. Sync
+         what this round wrote now, off the loop, so that sync has little left to do. */
+      if (own_db_fd >= 0) fdatasync(own_db_fd);
+    } else if (nlog >= 0) {
+      /* The whole log is copied: nobody reads these pages again, so let the kernel drop them
+         instead of keeping up to hundreds of megabytes of old log in its cache. */
+      if (own_wal_fd < 0 && wal_path[0]) own_wal_fd = open(wal_path, O_RDONLY | O_CLOEXEC);
+      if (own_wal_fd >= 0) posix_fadvise(own_wal_fd, 0, 0, POSIX_FADV_DONTNEED);
+    }
     ck_log = nlog; ck_done = ndone;
     ck_rounds++;
     __atomic_store_n(&ck_running, 0, __ATOMIC_RELEASE);
@@ -121,7 +282,10 @@ int td_open(const char *path, int cache_kb, int autockpt) {
   char sql[256];
   (void)autockpt;
   sqlite3_initialize();
-  rc = sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, "unix-excl");
+  const char *vfs = td_vfs_name();
+  own_db_fd = open(path, O_RDWR | O_CLOEXEC);
+  sqlite3_snprintf(sizeof wal_path, wal_path, "%s-wal", path);
+  rc = sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, vfs);
   if (rc) return fail("open", rc);
   sqlite3_snprintf(sizeof sql, sql,
     "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;"
@@ -169,7 +333,8 @@ int td_open(const char *path, int cache_kb, int autockpt) {
   }
   for (int i = 0; i < NUCUR; i++) {
     ucur[i] = sqlite3_malloc(sqlite3BtreeCursorSize());
-    if (!ucur[i]) return fail("cursor", 0);
+    pcur[i] = sqlite3_malloc(sqlite3BtreeCursorSize());
+    if (!ucur[i] || !pcur[i]) return fail("cursor", 0);
   }
 
 #define PREP(st, q) if ((rc = sqlite3_prepare_v3(db, q, -1, SQLITE_PREPARE_PERSISTENT, &st, 0))) return fail(q, rc)
@@ -185,6 +350,7 @@ int td_open(const char *path, int cache_kb, int autockpt) {
 static void close_cursors(void) {
   for (int i = 0; i < NCUR; i++) sqlite3BtreeCloseCursor(cur[i]);
   for (int i = 0; i < NUCUR; i++) sqlite3BtreeCloseCursor(ucur[i]);
+  for (int i = 0; i < NUCUR; i++) sqlite3BtreeCloseCursor(pcur[i]);
 }
 
 /* One transaction per event-loop pass: reads share a snapshot, writes are group-committed. */
@@ -205,10 +371,15 @@ int td_begin(void) {
   }
   for (int i = 0; i < NUCUR; i++) {
     sqlite3BtreeCursorZero(ucur[i]);
+    sqlite3BtreeCursorZero(pcur[i]);
     rc = sqlite3BtreeCursor(bt, root[C_USERS], 0, 0, ucur[i]);
+    if (!rc) {
+      rc = sqlite3BtreeCursor(bt, root[C_POSTS], 0, 0, pcur[i]);
+      if (rc) sqlite3BtreeCloseCursor(ucur[i]);
+    }
     if (rc) {
       for (int j = 0; j < NCUR; j++) sqlite3BtreeCloseCursor(cur[j]);
-      for (int j = 0; j < i; j++) sqlite3BtreeCloseCursor(ucur[j]);
+      for (int j = 0; j < i; j++) { sqlite3BtreeCloseCursor(ucur[j]); sqlite3BtreeCloseCursor(pcur[j]); }
       sqlite3_step(st_rollback); sqlite3_reset(st_rollback);
       return fail("cursor", rc);
     }
@@ -221,7 +392,10 @@ int td_commit(void) {
   if (!in_txn) return 0;
   in_txn = 0;
   close_cursors();
+  td_in_commit = 1;
   int rc = sqlite3_step(st_commit);
+  td_in_commit = 0;
+  if (td_wal && td_wal->n && td_flush(td_wal) && rc == SQLITE_DONE) rc = SQLITE_IOERR;
   sqlite3_reset(st_commit);
   if (rc != SQLITE_DONE) {
     fail("commit", rc);
@@ -259,8 +433,7 @@ int td_row(int c, int64_t rowid, uint8_t *buf, uint32_t cap) {
  * at once: its own "already there" check, nothing done here. The record is fetched from SQLite's
  * page for every request, as with any other cursor; only the cursor's position is kept, and only
  * until the transaction ends (the cursors are closed at COMMIT). */
-int td_user_row(int k, int64_t rowid, uint8_t *buf, uint32_t cap) {
-  BtCursor *c = ucur[k];
+static int slot_row(BtCursor *c, int64_t rowid, uint8_t *buf, uint32_t cap) {
   int res;
   if (sqlite3BtreeTableMoveto(c, rowid, 0, &res)) return -1;
   if (res) return 0;
@@ -271,6 +444,13 @@ int td_user_row(int k, int64_t rowid, uint8_t *buf, uint32_t cap) {
   else if (sqlite3BtreePayload(c, 0, sz, buf)) return -1;
   return (int)sz;
 }
+int td_user_row(int k, int64_t rowid, uint8_t *buf, uint32_t cap) { return slot_row(ucur[k], rowid, buf, cap); }
+
+/* The posts row `rowid` through posts cursor `k`, in the same way: a feed post keeps its cursor
+   on its own row from one request to the next. An INSERT into posts makes SQLite save the
+   position of every cursor on that table, and the next use of each then searches from the root
+   once: correct, and still far fewer searches than one per request. */
+int td_post_row(int k, int64_t rowid, uint8_t *buf, uint32_t cap) { return slot_row(pcur[k], rowid, buf, cap); }
 
 /* 1 = row exists */
 int td_exists(int c, int64_t rowid) {
