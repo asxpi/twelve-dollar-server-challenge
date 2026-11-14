@@ -351,17 +351,53 @@ end
 end
 
 -- Appends a non-negative integer (below 2^53) in decimal. Returns the new offset.
+-- Up to eight digits take straight-line code, two digits at a time from a table: no loop, and a
+-- multiplication where a division would be (v * 0.01 floors to v / 100 exactly below 2^32).
 local digits = ffi.new("uint8_t[24]")
-function M.uint(dst, o, v)
-  if v < 10 then dst[o] = 48 + v; return o + 1 end
+local D2 = ffi.new("uint8_t[200]")
+for i = 0, 99 do D2[2 * i] = 48 + math.floor(i / 10); D2[2 * i + 1] = 48 + i % 10 end
+local floor = math.floor
+local function uint_slow(dst, o, v)
   local n = 0
   while v > 0 do
-    local q = math.floor(v / 10)
+    local q = floor(v / 10)
     digits[n] = 48 + (v - q * 10); n = n + 1
     v = q
   end
   for k = n - 1, 0, -1 do dst[o] = digits[k]; o = o + 1 end
   return o
+end
+function M.uint(dst, o, v)
+  if v < 10 then dst[o] = 48 + v; return o + 1 end
+  if v < 100 then dst[o] = D2[2 * v]; dst[o + 1] = D2[2 * v + 1]; return o + 2 end
+  if v >= 100000000 then return uint_slow(dst, o, v) end
+  local lo = v
+  if v >= 10000 then
+    -- the leading one to four digits, then exactly four more
+    local hi = floor(v * 0.0001)
+    lo = v - hi * 10000
+    if hi < 100 then
+      if hi < 10 then dst[o] = 48 + hi; o = o + 1
+      else dst[o] = D2[2 * hi]; dst[o + 1] = D2[2 * hi + 1]; o = o + 2 end
+    else
+      local q = floor(hi * 0.01)
+      local r = hi - q * 100
+      if q < 10 then dst[o] = 48 + q; o = o + 1
+      else dst[o] = D2[2 * q]; dst[o + 1] = D2[2 * q + 1]; o = o + 2 end
+      dst[o] = D2[2 * r]; dst[o + 1] = D2[2 * r + 1]; o = o + 2
+    end
+    local q = floor(lo * 0.01)
+    local r = lo - q * 100
+    dst[o] = D2[2 * q]; dst[o + 1] = D2[2 * q + 1]; dst[o + 2] = D2[2 * r]; dst[o + 3] = D2[2 * r + 1]
+    return o + 4
+  end
+  -- 100 .. 9999
+  local q = floor(lo * 0.01)
+  local r = lo - q * 100
+  if q < 10 then dst[o] = 48 + q; o = o + 1
+  else dst[o] = D2[2 * q]; dst[o + 1] = D2[2 * q + 1]; o = o + 2 end
+  dst[o] = D2[2 * r]; dst[o + 1] = D2[2 * r + 1]
+  return o + 2
 end
 
 return M

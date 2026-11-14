@@ -333,14 +333,16 @@ local function get_feed()
     local id = feed_ids[k]
     if k > 0 then
       resp[o] = 44; o = o + 1
+      local rid
       repeat
         r = shim.td_prev(C_POSTS, rec, REC_CAP)
         if r <= 0 then
           if r < 0 then return fixed(R_INTERNAL) end
           return get_feed_slow()
         end
-      until tonumber(shim.td_rowid(C_POSTS)) <= id
-      if tonumber(shim.td_rowid(C_POSTS)) ~= id then return get_feed_slow() end
+        rid = tonumber(shim.td_rowid(C_POSTS))
+      until rid <= id
+      if rid ~= id then return get_feed_slow() end
     end
     local e = post_emit(o, id, feed_likes[id - lo])
     if not e then
